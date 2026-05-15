@@ -1,7 +1,4 @@
-import { useState } from "react";
-// TODO [BACKEND]: Replace APPROVED_PAYSLIPS with fetch("/api/payslips?month=YYYY-MM")
-// TODO [BACKEND]: "Download All (ZIP)" → fetch("/api/payslips/download-all?month=YYYY-MM")
-// TODO [BACKEND]: "Broadcast via WhatsApp" → fetch("/api/payslips/broadcast", { method: "POST" })
+import { useEffect, useMemo, useState } from "react";
 import { format } from "date-fns";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,6 +14,22 @@ import {
   Send,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  apiErrorMessage,
+  downloadBlob,
+  downloadPayslipPdf,
+  downloadPayslipsZip,
+  initialsFromName,
+  listEmployees,
+  monthYearFromDate,
+  readCompanySettings,
+  readPayrollLedger,
+  resolveApiAssetUrl,
+  type BackendCompanySettings,
+  type BackendEmployee,
+  type BackendPayrollLine,
+} from "@/lib/api";
+import { toast } from "sonner";
 
 // ---------- Hourly-based payslip data ----------
 interface ApprovedPayslip {
@@ -34,6 +47,10 @@ interface ApprovedPayslip {
   advancesTaken: number;
   professionalTax: number;
   bonus: number;
+  backendGrossPay?: number;
+  backendTotalPenalties?: number;
+  backendNetPay?: number;
+  backendOvertimeHours?: number;
 }
 
 const APPROVED_PAYSLIPS: ApprovedPayslip[] = [
@@ -48,14 +65,48 @@ const APPROVED_PAYSLIPS: ApprovedPayslip[] = [
 ];
 
 function getCalcs(p: ApprovedPayslip) {
-  const otHours = Math.max(0, p.hoursLogged - p.standardHours);
+  const otHours = p.backendOvertimeHours ?? Math.max(0, p.hoursLogged - p.standardHours);
   const shortHours = Math.max(0, p.standardHours - p.hoursLogged - p.paidLeaves * 8);
   const otPay = Math.round(otHours * p.hourlyRate * 100) / 100;
-  const shortPenalty = Math.round(shortHours * p.hourlyRate * 100) / 100;
-  const grossEarnings = p.baseSalary + otPay + p.bonus;
+  const shortPenalty = p.backendTotalPenalties ?? Math.round(shortHours * p.hourlyRate * 100) / 100;
+  const grossEarnings = p.backendGrossPay ?? p.baseSalary + otPay + p.bonus;
   const totalDeductions = shortPenalty + p.advancesTaken + p.professionalTax;
-  const net = grossEarnings - totalDeductions;
+  const net = (p.backendNetPay ?? grossEarnings - shortPenalty - p.advancesTaken) + p.bonus - p.professionalTax;
   return { otHours, shortHours, otPay, shortPenalty, grossEarnings, totalDeductions, net };
+}
+
+function numberFromApi(value: string | number | null | undefined): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mapLedgerLineToPayslip(line: BackendPayrollLine, employees: BackendEmployee[]): ApprovedPayslip {
+  const employee = employees.find((record) => record.id === line.employee_id);
+  const regularHours = numberFromApi(line.regular_hours);
+  const overtimeHours = numberFromApi(line.overtime_hours);
+  const monthlyBasic = numberFromApi(employee?.monthly_basic);
+  const hourlyRate = numberFromApi(employee?.hourly_rate) || (monthlyBasic > 0 ? monthlyBasic / 208 : 0);
+
+  return {
+    employeeId: line.employee_id,
+    name: line.employee_name,
+    avatar: initialsFromName(line.employee_name),
+    department: line.department,
+    designation: line.designation,
+    baseSalary: monthlyBasic || numberFromApi(line.gross_pay),
+    standardHours: 208,
+    hoursLogged: Math.round((regularHours + overtimeHours) * 100) / 100,
+    hourlyRate,
+    paidLeaves: 0,
+    leaveBalance: 0,
+    advancesTaken: numberFromApi(line.total_advances),
+    professionalTax: 0,
+    bonus: 0,
+    backendGrossPay: numberFromApi(line.gross_pay),
+    backendTotalPenalties: numberFromApi(line.total_penalties),
+    backendNetPay: numberFromApi(line.net_pay),
+    backendOvertimeHours: overtimeHours,
+  };
 }
 
 function amountToWords(n: number): string {
@@ -81,9 +132,81 @@ export default function ReceiptVault() {
   const [selectedMonth, setSelectedMonth] = useState<Date>(new Date(2026, 2, 1));
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [selectedId, setSelectedId] = useState("e1");
+  const [payslips, setPayslips] = useState(APPROVED_PAYSLIPS);
+  const [companySettings, setCompanySettings] = useState<BackendCompanySettings | null>(null);
+  const selectedMonthYear = useMemo(() => monthYearFromDate(selectedMonth), [selectedMonth]);
 
-  const selected = APPROVED_PAYSLIPS.find((p) => p.employeeId === selectedId) ?? APPROVED_PAYSLIPS[0];
+  useEffect(() => {
+    let cancelled = false;
+
+    readCompanySettings()
+      .then((settings) => {
+        if (!cancelled) setCompanySettings(settings);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load company settings", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    async function loadPayslips() {
+      try {
+        const [employees, ledger] = await Promise.all([
+          listEmployees(),
+          readPayrollLedger(selectedMonthYear),
+        ]);
+        if (cancelled) return;
+        const nextPayslips = ledger.items.map((line) => mapLedgerLineToPayslip(line, employees));
+        setPayslips(nextPayslips);
+        setSelectedId((current) => nextPayslips.some((slip) => slip.employeeId === current) ? current : nextPayslips[0]?.employeeId ?? "");
+      } catch (error) {
+        if (cancelled) return;
+        toast.error("Could not load locked payslips", {
+          description: apiErrorMessage(error),
+        });
+      }
+    }
+
+    loadPayslips();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMonthYear]);
+
+  const selected = payslips.find((p) => p.employeeId === selectedId) ?? payslips[0] ?? APPROVED_PAYSLIPS[0];
   const c = getCalcs(selected);
+  const logoUrl = resolveApiAssetUrl(companySettings?.logo_url);
+  const companyName = companySettings?.company_name ?? "PrintWorks Pvt. Ltd.";
+  const companyAddress = companySettings?.address ?? "42 Industrial Area, Sector 7\nNew Delhi — 110020";
+  const companyAddressLines = companyAddress.split("\n");
+
+  const handleDownloadAll = async () => {
+    try {
+      const file = await downloadPayslipsZip(selectedMonthYear);
+      downloadBlob(file.blob, file.filename);
+    } catch (error) {
+      toast.error("Could not download payslips", {
+        description: apiErrorMessage(error),
+      });
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    try {
+      const file = await downloadPayslipPdf(selectedMonthYear, selected.employeeId);
+      downloadBlob(file.blob, file.filename);
+    } catch (error) {
+      toast.error("Could not download payslip", {
+        description: apiErrorMessage(error),
+      });
+    }
+  };
+
+  const handleBroadcast = () => {
+    toast.info("WhatsApp broadcast is not configured on the backend yet.");
+  };
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -122,7 +245,7 @@ export default function ReceiptVault() {
             </div>
             <ScrollArea className="h-[420px]">
               <div className="px-2 pb-2">
-                {APPROVED_PAYSLIPS.map((p) => {
+                {payslips.map((p) => {
                   const pCalc = getCalcs(p);
                   return (
                     <button
@@ -156,11 +279,11 @@ export default function ReceiptVault() {
           <Card>
             <CardContent className="p-4 space-y-2">
               <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">Mass Actions</p>
-              <Button variant="outline" className="w-full h-9 text-sm gap-2 justify-center">
+              <Button variant="outline" className="w-full h-9 text-sm gap-2 justify-center" onClick={handleDownloadAll}>
                 <Download className="h-3.5 w-3.5" />
                 Download All (ZIP)
               </Button>
-              <Button className="w-full h-9 text-sm gap-2 justify-center bg-emerald-600 hover:bg-emerald-700 text-white">
+              <Button className="w-full h-9 text-sm gap-2 justify-center bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleBroadcast}>
                 <MessageCircle className="h-3.5 w-3.5" />
                 Broadcast via WhatsApp
               </Button>
@@ -172,15 +295,15 @@ export default function ReceiptVault() {
         <div className="relative">
           {/* Floating action bar */}
           <div className="flex items-center gap-1 mb-3 justify-end">
-            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5">
+            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={() => window.print()}>
               <Printer className="h-3.5 w-3.5" />
               Print
             </Button>
-            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5">
+            <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5" onClick={handleDownloadPdf}>
               <FileDown className="h-3.5 w-3.5" />
               Download PDF
             </Button>
-            <Button size="sm" className="h-8 text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white">
+            <Button size="sm" className="h-8 text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white" onClick={handleBroadcast}>
               <Send className="h-3.5 w-3.5" />
               WhatsApp
             </Button>
@@ -199,15 +322,18 @@ export default function ReceiptVault() {
               {/* Header band */}
               <div className="px-10 pt-8 pb-6 flex items-start justify-between relative">
                 <div className="flex items-start gap-4">
-                  {/* TODO [BACKEND]: Replace with dynamic logo from company settings */}
                   <div className="h-14 w-14 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700 font-black text-xl shrink-0">
-                    P
+                    {logoUrl ? <img src={logoUrl} alt="Company logo" className="max-h-12 max-w-12 object-contain" /> : "P"}
                   </div>
                   <div>
-                    <p className="text-[15px] font-bold text-foreground tracking-tight leading-tight">PrintWorks Pvt. Ltd.</p>
+                    <p className="text-[15px] font-bold text-foreground tracking-tight leading-tight">{companyName}</p>
                     <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">
-                      42 Industrial Area, Sector 7<br />
-                      New Delhi — 110020
+                      {companyAddressLines.map((line, index) => (
+                        <span key={`${line}-${index}`}>
+                          {line}
+                          {index < companyAddressLines.length - 1 && <br />}
+                        </span>
+                      ))}
                     </p>
                   </div>
                 </div>

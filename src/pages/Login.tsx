@@ -1,5 +1,4 @@
 import { useState } from "react";
-// TODO [BACKEND]: Replace mock login with fetch("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) })
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,16 +7,38 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Lock, LogIn, Shield, User } from "lucide-react";
 import { useAuth, type AppRole } from "@/contexts/AuthContext";
+import { apiErrorMessage } from "@/lib/api";
+import { toast } from "sonner";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, loginAsPrototype } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleMockLogin = (role: AppRole) => {
-    login(role);
+    loginAsPrototype(role);
     navigate("/");
+  };
+
+  const handleLogin = async () => {
+    if (!email.trim() || !password) {
+      toast.error("Enter your email and password to continue.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await login(email, password);
+      navigate("/");
+    } catch (error) {
+      toast.error("Login failed", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -95,7 +116,7 @@ export default function Login() {
                   </div>
                 </div>
 
-                <Button className="w-full h-10 text-sm gap-2 font-semibold" onClick={() => handleMockLogin("admin")}>
+                <Button className="w-full h-10 text-sm gap-2 font-semibold" onClick={handleLogin} disabled={isSubmitting}>
                   <LogIn className="h-4 w-4" />
                   Secure Login
                 </Button>

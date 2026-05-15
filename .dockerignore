@@ -1,8 +1,13 @@
 node_modules
 dist
+dist-ssr
 .git
 .env
+backend/.env
+backend/uploads
+__pycache__
+*.pyc
 .lovable
-package-lock.json
-bun.lock
-bun.lockb
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

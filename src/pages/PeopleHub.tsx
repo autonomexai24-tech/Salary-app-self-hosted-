@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,8 @@ import { Search, UserPlus, Zap, Phone, User, Save } from "lucide-react";
 import { MOCK_EMPLOYEES, type Employee } from "@/lib/mock-employees";
 import { COMPANY_FIXED_SHIFT } from "@/lib/payroll-config";
 import CompanySettings from "@/components/CompanySettings";
+import { apiErrorMessage, createEmployee, listEmployees, mapEmployeeToUi } from "@/lib/api";
+import { toast } from "sonner";
 
 const INITIAL_DESIGNATIONS = [
   "Operator",
@@ -41,6 +43,30 @@ export default function PeopleHub() {
   const [regDesig, setRegDesig] = useState("");
   const [regMonthly, setRegMonthly] = useState("");
   const [regWorkingDays, setRegWorkingDays] = useState("26");
+  const [isSavingEmployee, setIsSavingEmployee] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    listEmployees()
+      .then((records) => {
+        if (cancelled) return;
+        const nextEmployees = records.map(mapEmployeeToUi);
+        setEmployees(nextEmployees);
+        setDepartments((prev) => Array.from(new Set([...prev, ...nextEmployees.map((employee) => employee.department)])));
+        setDesignations((prev) => Array.from(new Set([...prev, ...nextEmployees.map((employee) => employee.designation)])));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load employees", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredEmployees = useMemo(() => {
     if (!search.trim()) return employees;
@@ -70,27 +96,27 @@ export default function PeopleHub() {
     setRegWorkingDays("26");
   };
 
-  const saveEmployee = () => {
+  const saveEmployee = async () => {
     if (!regName.trim() || !regDept || !regDesig || monthlyVal <= 0) return;
-    const initials = regName
-      .trim()
-      .split(" ")
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase()
-      .slice(0, 2);
-    const newEmp: Employee = {
-      id: `e${Date.now()}`,
-      name: regName.trim(),
-      department: regDept,
-      designation: regDesig,
-      dailyRate: perDay,
-      monthlyBasic: monthlyVal,
-      avatar: initials,
-    };
-    setEmployees((prev) => [...prev, newEmp]);
-    resetForm();
-    setSheetOpen(false);
+    setIsSavingEmployee(true);
+    try {
+      const created = await createEmployee({
+        fullName: regName.trim(),
+        department: regDept,
+        designation: regDesig,
+        monthlyBasic: monthlyVal,
+      });
+      setEmployees((prev) => [...prev, mapEmployeeToUi(created)]);
+      resetForm();
+      setSheetOpen(false);
+      toast.success("Employee profile saved");
+    } catch (error) {
+      toast.error("Could not save employee", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSavingEmployee(false);
+    }
   };
 
   return (
@@ -254,7 +280,7 @@ export default function PeopleHub() {
               </p>
             </div>
 
-            <Button onClick={saveEmployee} className="w-full" disabled={!regName.trim() || !regDept || !regDesig || monthlyVal <= 0}>
+            <Button onClick={saveEmployee} className="w-full" disabled={isSavingEmployee || !regName.trim() || !regDept || !regDesig || monthlyVal <= 0}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
               Save Employee Profile
             </Button>

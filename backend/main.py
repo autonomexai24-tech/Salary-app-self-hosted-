@@ -2,17 +2,31 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 try:
+    from .attendance import router as attendance_router
+    from .company_settings import router as company_settings_router
+    from .dashboard import router as dashboard_router
     from .database import get_db, get_settings
+    from .employees import router as employees_router
+    from .payroll import router as payroll_router
+    from .users import auth_router, router as users_router
 except ImportError:
+    from attendance import router as attendance_router
+    from company_settings import router as company_settings_router
+    from dashboard import router as dashboard_router
     from database import get_db, get_settings
+    from employees import router as employees_router
+    from payroll import router as payroll_router
+    from users import auth_router, router as users_router
 
 
 settings = get_settings()
+settings.upload_dir.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
     title=settings.app_name,
@@ -30,6 +44,20 @@ if settings.cors_origins:
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
     )
+
+
+app.mount(
+    settings.normalized_upload_url_path,
+    StaticFiles(directory=settings.upload_dir),
+    name="uploads",
+)
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(company_settings_router)
+app.include_router(employees_router)
+app.include_router(attendance_router)
+app.include_router(payroll_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/", tags=["system"])

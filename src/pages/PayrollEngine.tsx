@@ -1,5 +1,4 @@
-import { useState, useMemo } from "react";
-// TODO [BACKEND]: Replace MOCK_PAYROLL with fetch("/api/payroll/ledger?month=YYYY-MM")
+import { useEffect, useState, useMemo } from "react";
 import { format } from "date-fns";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,6 +27,18 @@ import {
   Timer,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  apiErrorMessage,
+  initialsFromName,
+  listEmployees,
+  monthYearFromDate,
+  readPayrollLedger,
+  readPayrollPreview,
+  savePayrollLedger,
+  type BackendEmployee,
+  type BackendPayrollLine,
+} from "@/lib/api";
+import { toast } from "sonner";
 
 // ---------- Types & Mock Data ----------
 interface PayrollRow {
@@ -42,6 +53,10 @@ interface PayrollRow {
   hourlyRate: number;
   paidLeaves: number;
   advancesTaken: number;
+  backendGrossPay?: number;
+  backendTotalPenalties?: number;
+  backendNetPay?: number;
+  backendOvertimeHours?: number;
 }
 
 const MOCK_PAYROLL: PayrollRow[] = [
@@ -60,14 +75,45 @@ const MOCK_PAYROLL: PayrollRow[] = [
  * Formula: (Base Salary) + (OT Hours × OT Rate) - (Shortfall Hours × Shortfall Rate) - (Advances) + (Bonuses) - (Fines)
  */
 function getCalcs(row: PayrollRow, bonus = 0, fines = 0) {
-  const otHours = Math.max(0, row.hoursLogged - row.standardHours);
+  const otHours = row.backendOvertimeHours ?? Math.max(0, row.hoursLogged - row.standardHours);
   const shortHours = Math.max(0, row.standardHours - row.hoursLogged - row.paidLeaves * 8);
   const otPay = Math.round(otHours * row.hourlyRate);
-  const shortDeduction = Math.round(shortHours * row.hourlyRate);
-  const grossEarned = row.baseSalary + otPay;
+  const shortDeduction = row.backendTotalPenalties ?? Math.round(shortHours * row.hourlyRate);
+  const grossEarned = row.backendGrossPay ?? row.baseSalary + otPay;
   const totalDeductions = shortDeduction + row.advancesTaken + fines;
-  const netPayable = grossEarned - totalDeductions + bonus;
+  const netPayable = (row.backendNetPay ?? grossEarned - shortDeduction - row.advancesTaken) + bonus - fines;
   return { otHours, shortHours, otPay, shortDeduction, grossEarned, totalDeductions, netPayable };
+}
+
+function numberFromApi(value: string | number | null | undefined): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mapPayrollLineToRow(line: BackendPayrollLine, employees: BackendEmployee[]): PayrollRow {
+  const employee = employees.find((record) => record.id === line.employee_id);
+  const regularHours = numberFromApi(line.regular_hours);
+  const overtimeHours = numberFromApi(line.overtime_hours);
+  const monthlyBasic = numberFromApi(employee?.monthly_basic);
+  const hourlyRate = numberFromApi(employee?.hourly_rate) || (monthlyBasic > 0 ? monthlyBasic / 208 : 0);
+
+  return {
+    employeeId: line.employee_id,
+    name: line.employee_name,
+    avatar: initialsFromName(line.employee_name),
+    role: line.designation,
+    department: line.department,
+    baseSalary: monthlyBasic || numberFromApi(line.gross_pay),
+    standardHours: 208,
+    hoursLogged: Math.round((regularHours + overtimeHours) * 100) / 100,
+    hourlyRate,
+    paidLeaves: 0,
+    advancesTaken: numberFromApi(line.total_advances),
+    backendGrossPay: numberFromApi(line.gross_pay),
+    backendTotalPenalties: numberFromApi(line.total_penalties),
+    backendNetPay: numberFromApi(line.net_pay),
+    backendOvertimeHours: overtimeHours,
+  };
 }
 
 // ---------- Component ----------
@@ -77,6 +123,48 @@ export default function PayrollEngine() {
   const [reviewRow, setReviewRow] = useState<PayrollRow | null>(null);
   const [bonus, setBonus] = useState("");
   const [fines, setFines] = useState("");
+  const [employeeRecords, setEmployeeRecords] = useState<BackendEmployee[]>([]);
+  const [payrollRows, setPayrollRows] = useState<PayrollRow[]>(MOCK_PAYROLL);
+  const [isSavingPayroll, setIsSavingPayroll] = useState(false);
+  const selectedMonthYear = useMemo(() => monthYearFromDate(selectedMonth), [selectedMonth]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPayroll() {
+      try {
+        const employees = await listEmployees();
+        if (cancelled) return;
+        setEmployeeRecords(employees);
+
+        const preview = await readPayrollPreview(selectedMonth);
+        if (cancelled) return;
+        if (preview.line_items.length > 0) {
+          setPayrollRows(preview.line_items.map((line) => mapPayrollLineToRow(line, employees)));
+          return;
+        }
+
+        try {
+          const ledger = await readPayrollLedger(selectedMonthYear);
+          if (cancelled) return;
+          setPayrollRows(ledger.items.map((line) => mapPayrollLineToRow(line, employees)));
+        } catch {
+          if (!cancelled) setPayrollRows([]);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        toast.error("Could not load payroll data", {
+          description: apiErrorMessage(error),
+        });
+      }
+    }
+
+    loadPayroll();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedMonth, selectedMonthYear]);
 
   const openReview = (row: PayrollRow) => {
     setReviewRow(row);
@@ -89,7 +177,7 @@ export default function PayrollEngine() {
 
   const pulse = useMemo(() => {
     let totalBase = 0, totalOT = 0, totalDeductions = 0, totalNet = 0;
-    for (const r of MOCK_PAYROLL) {
+    for (const r of payrollRows) {
       const c = getCalcs(r);
       totalBase += r.baseSalary;
       totalOT += c.otPay;
@@ -97,7 +185,26 @@ export default function PayrollEngine() {
       totalNet += c.netPayable;
     }
     return { totalBase, totalOT, totalDeductions, totalNet };
-  }, []);
+  }, [payrollRows]);
+
+  const approvePayroll = async () => {
+    setIsSavingPayroll(true);
+    try {
+      const ledger = await savePayrollLedger(selectedMonthYear);
+      const employees = employeeRecords.length ? employeeRecords : await listEmployees();
+      setEmployeeRecords(employees);
+      setPayrollRows(ledger.items.map((line) => mapPayrollLineToRow(line, employees)));
+      toast.success("Payroll ledger locked", {
+        description: `${format(selectedMonth, "MMMM yyyy")} payslips are ready.`,
+      });
+    } catch (error) {
+      toast.error("Could not approve payroll", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSavingPayroll(false);
+    }
+  };
 
   const inr = (n: number) => n.toLocaleString("en-IN");
 
@@ -127,7 +234,7 @@ export default function PayrollEngine() {
               />
             </PopoverContent>
           </Popover>
-          <Button className="bg-emerald-600 hover:bg-emerald-700 text-white h-9 text-sm gap-2">
+          <Button className="bg-emerald-600 hover:bg-emerald-700 text-white h-9 text-sm gap-2" onClick={approvePayroll} disabled={isSavingPayroll}>
             <FileCheck className="h-3.5 w-3.5" />
             Approve & Generate Payslips
           </Button>
@@ -158,7 +265,7 @@ export default function PayrollEngine() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {MOCK_PAYROLL.map((row) => {
+              {payrollRows.map((row) => {
                 const c = getCalcs(row);
                 const hoursOver = row.hoursLogged >= row.standardHours;
                 return (

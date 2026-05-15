@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,67 +13,125 @@ import { MOCK_EMPLOYEES, SEED_ATTENDANCE, type AttendanceEntry } from "@/lib/moc
 import { calculateShiftDetails, getStatusFromEntry } from "@/lib/payroll-utils";
 import { COMPANY_FIXED_SHIFT } from "@/lib/payroll-config";
 import { cn } from "@/lib/utils";
+import {
+  apiErrorMessage,
+  dateInputValue,
+  emptyAttendanceEntry,
+  listAttendanceEntries,
+  listEmployees,
+  mapAttendanceEntryToUi,
+  mapEmployeeToUi,
+  saveAttendanceEntry,
+} from "@/lib/api";
 type FilterStatus = "all" | "present" | "late" | "pending";
 
-export default function DailyLog() {
-  const [attendance, setAttendance] = useState<Record<string, AttendanceEntry>>(() => {
-    const map: Record<string, AttendanceEntry> = {};
-    MOCK_EMPLOYEES.forEach((emp) => {
-      const seed = SEED_ATTENDANCE.find((s) => s.employeeId === emp.id);
-      map[emp.id] = seed ?? { employeeId: emp.id, timeIn: "", timeOut: "", advance: 0 };
-    });
-    return map;
+function buildInitialAttendanceMap() {
+  const map: Record<string, AttendanceEntry> = {};
+  MOCK_EMPLOYEES.forEach((emp) => {
+    const seed = SEED_ATTENDANCE.find((s) => s.employeeId === emp.id);
+    map[emp.id] = seed ?? emptyAttendanceEntry(emp.id);
   });
+  return map;
+}
+
+export default function DailyLog() {
+  const [employees, setEmployees] = useState(MOCK_EMPLOYEES);
+  const [attendance, setAttendance] = useState<Record<string, AttendanceEntry>>(() => buildInitialAttendanceMap());
 
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [reportOpen, setReportOpen] = useState(false);
   const [reportMonth, setReportMonth] = useState("march-2026");
+  const todayIso = useMemo(() => dateInputValue(new Date()), []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    listEmployees()
+      .then((records) => {
+        if (cancelled) return;
+        const nextEmployees = records.map(mapEmployeeToUi);
+        setEmployees(nextEmployees);
+        setAttendance((prev) => {
+          const next: Record<string, AttendanceEntry> = {};
+          nextEmployees.forEach((employee) => {
+            next[employee.id] = prev[employee.id] ?? emptyAttendanceEntry(employee.id);
+          });
+          return next;
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load employees", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    listAttendanceEntries(todayIso)
+      .then((entries) => {
+        if (cancelled) return;
+        setAttendance((prev) => {
+          const next = { ...prev };
+          entries.forEach((entry) => {
+            next[entry.employee_id] = mapAttendanceEntryToUi(entry);
+          });
+          return next;
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load today's attendance", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [todayIso]);
 
   const updateAttendance = (empId: string, field: keyof AttendanceEntry, value: string | number) => {
     setAttendance((prev) => ({
       ...prev,
-      [empId]: { ...prev[empId], [field]: value },
+      [empId]: { ...(prev[empId] ?? emptyAttendanceEntry(empId)), [field]: value },
     }));
   };
 
   const quickFill = (empId: string) => {
     setAttendance((prev) => ({
       ...prev,
-      [empId]: { ...prev[empId], timeIn: COMPANY_FIXED_SHIFT.start, timeOut: COMPANY_FIXED_SHIFT.end },
+      [empId]: { ...(prev[empId] ?? emptyAttendanceEntry(empId)), timeIn: COMPANY_FIXED_SHIFT.start, timeOut: COMPANY_FIXED_SHIFT.end },
     }));
   };
 
-  // TODO [BACKEND]: Replace with fetch("/api/attendance", { method: "POST", body: JSON.stringify(payload) })
-  const saveAttendance = useCallback((empId: string) => {
+  const saveAttendance = useCallback(async (empId: string) => {
     const entry = attendance[empId];
     if (!entry.timeIn || !entry.timeOut) return;
 
-    // Format as ISO strings for backend readiness
-    const today = new Date().toISOString().split("T")[0];
-    const _isoPayload = {
-      employeeId: empId,
-      date: today,
-      timeIn: `${today}T${entry.timeIn}:00`,
-      timeOut: `${today}T${entry.timeOut}:00`,
-    };
-
-    // Close the card and show success toast
-    setOpenCards((prev) => ({ ...prev, [empId]: false }));
-    const emp = MOCK_EMPLOYEES.find((e) => e.id === empId);
-    toast.success("Attendance Logged Successfully", {
-      description: `${emp?.name ?? "Employee"} — ${entry.timeIn} to ${entry.timeOut}`,
-    });
-  }, [attendance]);
+    try {
+      const saved = await saveAttendanceEntry(entry, todayIso);
+      const savedEntry = mapAttendanceEntryToUi(saved);
+      setAttendance((prev) => ({ ...prev, [empId]: savedEntry }));
+      setOpenCards((prev) => ({ ...prev, [empId]: false }));
+      const emp = employees.find((e) => e.id === empId);
+      toast.success("Attendance Logged Successfully", {
+        description: `${emp?.name ?? "Employee"} — ${savedEntry.timeIn} to ${savedEntry.timeOut}`,
+      });
+    } catch (error) {
+      toast.error("Could not save attendance", {
+        description: apiErrorMessage(error),
+      });
+    }
+  }, [attendance, employees, todayIso]);
 
   const employeeStatuses = useMemo(() => {
     const map: Record<string, "present" | "late" | "pending"> = {};
-    MOCK_EMPLOYEES.forEach((emp) => {
+    employees.forEach((emp) => {
       const entry = attendance[emp.id];
       map[emp.id] = entry ? getStatusFromEntry(entry.timeIn, entry.timeOut) : "pending";
     });
     return map;
-  }, [attendance]);
+  }, [attendance, employees]);
 
   const counts = useMemo(() => {
     let present = 0, late = 0, pending = 0;
@@ -82,13 +140,13 @@ export default function DailyLog() {
       else if (s === "late") late++;
       else pending++;
     });
-    return { present, late, pending, all: MOCK_EMPLOYEES.length };
-  }, [employeeStatuses]);
+    return { present, late, pending, all: employees.length };
+  }, [employeeStatuses, employees.length]);
 
   const filteredEmployees = useMemo(() => {
-    if (filter === "all") return MOCK_EMPLOYEES;
-    return MOCK_EMPLOYEES.filter((emp) => employeeStatuses[emp.id] === filter);
-  }, [filter, employeeStatuses]);
+    if (filter === "all") return employees;
+    return employees.filter((emp) => employeeStatuses[emp.id] === filter);
+  }, [filter, employeeStatuses, employees]);
 
   const today = new Date().toLocaleDateString("en-IN", {
     weekday: "long",
@@ -139,7 +197,7 @@ export default function DailyLog() {
       {/* Employee Cards */}
       <div className="space-y-2">
         {filteredEmployees.map((emp) => {
-          const entry = attendance[emp.id];
+          const entry = attendance[emp.id] ?? emptyAttendanceEntry(emp.id);
           const status = employeeStatuses[emp.id];
           const shift = calculateShiftDetails(entry.timeIn, entry.timeOut);
           const isOpen = openCards[emp.id] ?? false;

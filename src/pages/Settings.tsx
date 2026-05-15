@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,6 +7,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Building2, ImageIcon, Save, ShieldCheck, Plus, UserX } from "lucide-react";
+import {
+  apiErrorMessage,
+  createUser,
+  listUsers,
+  readCompanySettings,
+  resolveApiAssetUrl,
+  updateCompanySettings,
+  uploadCompanyLogo,
+} from "@/lib/api";
+import { toast } from "sonner";
 
 interface SystemUser {
   id: string;
@@ -25,6 +35,7 @@ export default function Settings() {
   const [companyName, setCompanyName] = useState("PrintWorks Pvt. Ltd.");
   const [companyAddress, setCompanyAddress] = useState("42 Industrial Area, Sector 7\nNew Delhi — 110020");
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [isSavingBranding, setIsSavingBranding] = useState(false);
 
   // User management
   const [users, setUsers] = useState<SystemUser[]>(INITIAL_USERS);
@@ -33,12 +44,106 @@ export default function Settings() {
   const [newRole, setNewRole] = useState<"Admin" | "Operator">("Operator");
   const [newPassword, setNewPassword] = useState("");
 
-  const addUser = () => {
-    if (!newName.trim() || !newUserId.trim()) return;
-    setUsers(prev => [...prev, { id: `su${Date.now()}`, name: newName.trim(), userId: newUserId.trim(), role: newRole }]);
-    setNewName("");
-    setNewUserId("");
-    setNewPassword("");
+  useEffect(() => {
+    let cancelled = false;
+
+    readCompanySettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setCompanyName(settings.company_name);
+        setCompanyAddress(settings.address ?? "");
+        setLogoPreview(resolveApiAssetUrl(settings.logo_url));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load company settings", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    listUsers()
+      .then((records) => {
+        if (cancelled) return;
+        setUsers(records.map((user) => ({
+          id: user.id,
+          name: user.full_name,
+          userId: user.email,
+          role: user.role === "admin" ? "Admin" : "Operator",
+        })));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load users", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveBranding = async () => {
+    setIsSavingBranding(true);
+    try {
+      const settings = await updateCompanySettings({
+        company_name: companyName.trim(),
+        address: companyAddress.trim() || null,
+      });
+      setCompanyName(settings.company_name);
+      setCompanyAddress(settings.address ?? "");
+      toast.success("Company branding saved");
+    } catch (error) {
+      toast.error("Could not save company branding", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSavingBranding(false);
+    }
+  };
+
+  const handleLogoFile = async (file: File) => {
+    const previousLogo = logoPreview;
+    const localPreviewUrl = URL.createObjectURL(file);
+    setLogoPreview(localPreviewUrl);
+    try {
+      const settings = await uploadCompanyLogo(file);
+      setLogoPreview(resolveApiAssetUrl(settings.logo_url));
+      toast.success("Company logo uploaded");
+    } catch (error) {
+      setLogoPreview(previousLogo);
+      toast.error("Could not upload company logo", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      URL.revokeObjectURL(localPreviewUrl);
+    }
+  };
+
+  const addUser = async () => {
+    if (!newName.trim() || !newUserId.trim() || !newPassword) return;
+    try {
+      const created = await createUser({
+        fullName: newName.trim(),
+        email: newUserId.trim(),
+        password: newPassword,
+        role: newRole === "Admin" ? "admin" : "staff",
+      });
+      setUsers(prev => [...prev, {
+        id: created.id,
+        name: created.full_name,
+        userId: created.email,
+        role: created.role === "admin" ? "Admin" : "Operator",
+      }]);
+      setNewName("");
+      setNewUserId("");
+      setNewPassword("");
+      toast.success("User created");
+    } catch (error) {
+      toast.error("Could not create user", {
+        description: apiErrorMessage(error),
+      });
+    }
   };
 
   return (
@@ -81,11 +186,11 @@ export default function Settings() {
                 )}
                 <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={(e) => {
                   const file = e.target.files?.[0];
-                  if (file) setLogoPreview(URL.createObjectURL(file));
+                  if (file) handleLogoFile(file);
                 }} />
               </label>
             </div>
-            <Button className="w-full mt-2" size="sm">
+            <Button className="w-full mt-2" size="sm" onClick={saveBranding} disabled={isSavingBranding}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
               Save Branding
             </Button>
@@ -127,7 +232,7 @@ export default function Settings() {
                 <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" className="h-9 text-sm" />
               </div>
             </div>
-            <Button size="sm" variant="outline" className="w-full" onClick={addUser} disabled={!newName.trim() || !newUserId.trim()}>
+            <Button size="sm" variant="outline" className="w-full" onClick={addUser} disabled={!newName.trim() || !newUserId.trim() || !newPassword}>
               <Plus className="h-3.5 w-3.5 mr-1.5" />
               Add User
             </Button>
@@ -148,7 +253,7 @@ export default function Settings() {
                   </div>
                   <div className="flex items-center gap-2">
                     <Badge variant={u.role === "Admin" ? "default" : "secondary"} className="text-[10px]">{u.role}</Badge>
-                    <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setUsers(prev => prev.filter(x => x.id !== u.id))}>
+                    <Button variant="ghost" size="sm" className="h-7 text-xs text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => toast.info("User revoke is not available on the backend yet.")}>
                       <UserX className="h-3 w-3 mr-1" />
                       Revoke
                     </Button>

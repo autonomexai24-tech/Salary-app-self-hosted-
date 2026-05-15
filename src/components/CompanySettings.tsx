@@ -1,8 +1,5 @@
-// TODO [BACKEND]: Replace local state with fetch("/api/settings/company") for all settings
-// TODO [BACKEND]: Save buttons → fetch("/api/settings/company", { method: "PUT", body: ... })
-// TODO [BACKEND]: Logo upload → FormData POST to "/api/settings/logo"
 // TODO [BACKEND]: Holiday calendar → fetch("/api/settings/holidays") GET/POST/DELETE
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +13,14 @@ import { Plus, X, Clock, Save, CalendarDays, Palmtree, Building2, ImageIcon } fr
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { COMPANY_FIXED_SHIFT, GRACE_PERIOD_MINUTES } from "@/lib/payroll-config";
+import {
+  apiErrorMessage,
+  readCompanySettings,
+  resolveApiAssetUrl,
+  updateCompanySettings,
+  uploadCompanyLogo,
+} from "@/lib/api";
+import { toast } from "sonner";
 
 interface Holiday {
   id: string;
@@ -63,10 +68,38 @@ export default function CompanySettings({
   const [companyName, setCompanyName] = useState("PrintWorks Pvt. Ltd.");
   const [companyAddress, setCompanyAddress] = useState("42 Industrial Area, Sector 7\nNew Delhi — 110020");
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [isSavingTimings, setIsSavingTimings] = useState(false);
+  const [isSavingBranding, setIsSavingBranding] = useState(false);
 
   // Designation & Department inputs
   const [newDesignation, setNewDesignation] = useState("");
   const [newDepartment, setNewDepartment] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    readCompanySettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setShiftStart(settings.shift_start_time.slice(0, 5));
+        setShiftEnd(settings.shift_end_time.slice(0, 5));
+        setWorkingHours(String(Number(settings.standard_work_hours)));
+        setGracePeriod(String(settings.grace_period_minutes));
+        setCompanyName(settings.company_name);
+        setCompanyAddress(settings.address ?? "");
+        setLogoPreview(resolveApiAssetUrl(settings.logo_url));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load company settings", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const formatShiftLabel = (time: string) => {
     if (!time) return "";
@@ -110,6 +143,62 @@ export default function CompanySettings({
     setHolidayName("");
   };
 
+  const saveMasterTimings = async () => {
+    setIsSavingTimings(true);
+    try {
+      await updateCompanySettings({
+        shift_start_time: shiftStart,
+        shift_end_time: shiftEnd,
+        standard_work_hours: Number(workingHours) || COMPANY_FIXED_SHIFT.totalHours,
+        grace_period_minutes: Number(gracePeriod) || 0,
+      });
+      toast.success("Master timings saved");
+    } catch (error) {
+      toast.error("Could not save master timings", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSavingTimings(false);
+    }
+  };
+
+  const saveBranding = async () => {
+    setIsSavingBranding(true);
+    try {
+      const settings = await updateCompanySettings({
+        company_name: companyName.trim(),
+        address: companyAddress.trim() || null,
+      });
+      setCompanyName(settings.company_name);
+      setCompanyAddress(settings.address ?? "");
+      toast.success("Company branding saved");
+    } catch (error) {
+      toast.error("Could not save company branding", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSavingBranding(false);
+    }
+  };
+
+  const handleLogoFile = async (file: File) => {
+    const previousLogo = logoPreview;
+    const localPreviewUrl = URL.createObjectURL(file);
+    setLogoPreview(localPreviewUrl);
+    try {
+      const settings = await uploadCompanyLogo(file);
+      setLogoPreview(resolveApiAssetUrl(settings.logo_url));
+      toast.success("Company logo uploaded");
+    } catch (error) {
+      setLogoPreview(previousLogo);
+      toast.error("Could not upload company logo", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      URL.revokeObjectURL(localPreviewUrl);
+    }
+  };
+
   const sortedHolidays = useMemo(
     () => [...holidays].sort((a, b) => a.date.getTime() - b.date.getTime()),
     [holidays]
@@ -150,7 +239,7 @@ export default function CompanySettings({
                 <p className="text-[11px] text-muted-foreground">No penalty before {graceEnd}</p>
               </div>
             </div>
-            <Button className="w-full mt-2" size="sm">
+            <Button className="w-full mt-2" size="sm" onClick={saveMasterTimings} disabled={isSavingTimings}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
               Save Master Timings
             </Button>
@@ -191,7 +280,7 @@ export default function CompanySettings({
                 </SelectContent>
               </Select>
             </div>
-            <Button className="w-full mt-2" size="sm">
+            <Button className="w-full mt-2" size="sm" onClick={() => toast.info("Leave policy storage is not available on the backend yet.")}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
               Save Leave Rules
             </Button>
@@ -236,12 +325,12 @@ export default function CompanySettings({
                   className="hidden"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) setLogoPreview(URL.createObjectURL(file));
+                    if (file) handleLogoFile(file);
                   }}
                 />
               </label>
             </div>
-            <Button className="w-full mt-2" size="sm">
+            <Button className="w-full mt-2" size="sm" onClick={saveBranding} disabled={isSavingBranding}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
               Save Branding
             </Button>
