@@ -56,6 +56,7 @@ except ImportError:
 
 
 router = APIRouter(prefix="/payroll", tags=["payroll"])
+receipts_router = APIRouter(prefix="/receipts", tags=["receipts"])
 COMPANY_SETTINGS_ID = 1
 DEFAULT_COMPANY_NAME = "Your Company"
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
@@ -244,6 +245,20 @@ def ensure_payroll_month_not_saved(db: Session, *, month_year: str) -> None:
         )
 
 
+def preview_payroll_for_period(
+    db: Session,
+    *,
+    period_start: date_type,
+    period_end: date_type,
+) -> PayrollPreviewRead:
+    preview = calculate_payroll_preview(
+        load_attendance_logs(db, period_start=period_start, period_end=period_end),
+        period_start=period_start,
+        period_end=period_end,
+    )
+    return payroll_preview_response(preview)
+
+
 @router.get("/preview", response_model=PayrollPreviewRead, summary="Preview payroll totals")
 def preview_payroll(
     period_start: Annotated[date_type, Query()],
@@ -260,13 +275,37 @@ def preview_payroll(
             ),
         )
 
-    preview = calculate_payroll_preview(
-        load_attendance_logs(db, period_start=period_start, period_end=period_end),
+    return preview_payroll_for_period(
+        db,
         period_start=period_start,
         period_end=period_end,
     )
 
-    return payroll_preview_response(preview)
+
+@router.post(
+    "/preview/{month_year}",
+    response_model=PayrollPreviewRead,
+    summary="Preview payroll totals for a month",
+    include_in_schema=False,
+)
+def preview_payroll_month(
+    month_year: str,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> PayrollPreviewRead:
+    try:
+        period_start, period_end = parse_month_year(month_year)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_detail("invalid_payroll_month", str(exc)),
+        ) from exc
+
+    return preview_payroll_for_period(
+        db,
+        period_start=period_start,
+        period_end=period_end,
+    )
 
 
 @router.get(
@@ -305,26 +344,15 @@ def read_payroll_ledger(
     )
 
 
-@router.post(
-    "/ledger",
-    response_model=PayrollLedgerRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Save and lock a payroll ledger month",
-)
-@router.post(
-    "/save",
-    response_model=PayrollLedgerRead,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False,
-)
-def save_payroll_ledger(
-    payload: PayrollLedgerSaveRequest,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_admin_user)],
+def save_payroll_ledger_for_month(
+    *,
+    month_year: str,
+    db: Session,
+    current_user: User,
 ) -> PayrollLedgerRead:
-    period_start, period_end = parse_month_year(payload.month_year)
-    lock_payroll_month(db, payload.month_year)
-    ensure_payroll_month_not_saved(db, month_year=payload.month_year)
+    period_start, period_end = parse_month_year(month_year)
+    lock_payroll_month(db, month_year)
+    ensure_payroll_month_not_saved(db, month_year=month_year)
 
     preview = calculate_payroll_preview(
         load_attendance_logs(db, period_start=period_start, period_end=period_end),
@@ -336,13 +364,13 @@ def save_payroll_ledger(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_detail(
                 "empty_payroll_period",
-                f"No attendance entries exist for {payload.month_year}",
+                f"No attendance entries exist for {month_year}",
             ),
         )
 
     ledger_rows = [
         PayrollLedger(
-            month_year=payload.month_year,
+            month_year=month_year,
             period_start=period_start,
             period_end=period_end,
             employee_id=line.employee_id,
@@ -371,28 +399,75 @@ def save_payroll_ledger(
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_locked",
-                f"Payroll for {payload.month_year} has already been saved and locked",
+                f"Payroll for {month_year} has already been saved and locked",
             ),
         ) from exc
 
-    rows = get_ledger_rows(db, month_year=payload.month_year)
+    rows = get_ledger_rows(db, month_year=month_year)
     return payroll_ledger_response(
-        month_year=payload.month_year,
+        month_year=month_year,
         period_start=period_start,
         period_end=period_end,
         rows=rows,
     )
 
 
-@router.get(
-    "/ledger/{month_year}/payslips/{employee_id}/pdf",
-    summary="Download a locked employee payslip PDF",
+@router.post(
+    "/ledger",
+    response_model=PayrollLedgerRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Save and lock a payroll ledger month",
 )
-def download_employee_payslip(
+@router.post(
+    "/save",
+    response_model=PayrollLedgerRead,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def save_payroll_ledger(
+    payload: PayrollLedgerSaveRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
+) -> PayrollLedgerRead:
+    return save_payroll_ledger_for_month(
+        month_year=payload.month_year,
+        db=db,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/lock/{month_year}",
+    response_model=PayrollLedgerRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Save and lock a payroll ledger month",
+    include_in_schema=False,
+)
+def lock_payroll_ledger_month(
+    month_year: str,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
+) -> PayrollLedgerRead:
+    try:
+        parse_month_year(month_year)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_detail("invalid_payroll_month", str(exc)),
+        ) from exc
+
+    return save_payroll_ledger_for_month(
+        month_year=month_year,
+        db=db,
+        current_user=current_user,
+    )
+
+
+def build_employee_payslip_response(
+    *,
     month_year: str,
     employee_id: uuid.UUID,
-    db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(get_current_admin_user)],
+    db: Session,
 ) -> Response:
     try:
         parse_month_year(month_year)
@@ -425,18 +500,44 @@ def download_employee_payslip(
 
 
 @router.get(
-    "/ledger/{month_year}/payslips.zip",
-    summary="Publish all locked payslips for a month",
+    "/ledger/{month_year}/payslips/{employee_id}/pdf",
+    summary="Download a locked employee payslip PDF",
 )
-@router.post(
-    "/ledger/{month_year}/publish",
-    summary="Publish all locked payslips for a month",
+def download_employee_payslip(
+    month_year: str,
+    employee_id: uuid.UUID,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> Response:
+    return build_employee_payslip_response(
+        month_year=month_year,
+        employee_id=employee_id,
+        db=db,
+    )
+
+
+@receipts_router.get(
+    "/generate/{employee_id}/{month_year}",
+    summary="Download a locked employee payslip PDF",
     include_in_schema=False,
 )
-def publish_month_payslips(
+def generate_employee_payslip(
+    employee_id: uuid.UUID,
     month_year: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
+) -> Response:
+    return build_employee_payslip_response(
+        month_year=month_year,
+        employee_id=employee_id,
+        db=db,
+    )
+
+
+def build_month_payslips_response(
+    *,
+    month_year: str,
+    db: Session,
 ) -> Response:
     try:
         parse_month_year(month_year)
@@ -478,4 +579,40 @@ def publish_month_payslips(
             "Content-Disposition": f'attachment; filename="{archive_name}"',
             "Cache-Control": "no-store",
         },
+    )
+
+
+@router.get(
+    "/ledger/{month_year}/payslips.zip",
+    summary="Publish all locked payslips for a month",
+)
+@router.post(
+    "/ledger/{month_year}/publish",
+    summary="Publish all locked payslips for a month",
+    include_in_schema=False,
+)
+def publish_month_payslips(
+    month_year: str,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> Response:
+    return build_month_payslips_response(
+        month_year=month_year,
+        db=db,
+    )
+
+
+@receipts_router.get(
+    "/generate-all/{month_year}",
+    summary="Publish all locked payslips for a month",
+    include_in_schema=False,
+)
+def generate_all_payslips(
+    month_year: str,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> Response:
+    return build_month_payslips_response(
+        month_year=month_year,
+        db=db,
     )

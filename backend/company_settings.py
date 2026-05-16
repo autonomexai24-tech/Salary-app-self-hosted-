@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,7 +24,7 @@ except ImportError:
 COMPANY_SETTINGS_ID = 1
 DEFAULT_COMPANY_NAME = "Your Company"
 
-router = APIRouter(prefix="/company-settings", tags=["company-settings"])
+router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 def error_detail(code: str, message: str) -> dict[str, str]:
@@ -90,6 +92,36 @@ def detect_logo_format(content: bytes) -> tuple[str, str] | None:
     return None
 
 
+def extract_multipart_file(content_type: str | None, body: bytes) -> bytes:
+    if not content_type or "multipart/form-data" not in content_type.lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_detail("invalid_logo_upload", "Logo upload must use multipart form data"),
+        )
+
+    message = BytesParser(policy=email_policy).parsebytes(
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
+    )
+    if not message.is_multipart():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_detail("invalid_logo_upload", "Logo upload was not a valid multipart request"),
+        )
+
+    for part in message.iter_parts():
+        if part.get_param("name", header="content-disposition") != "file":
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            return b""
+        return payload
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=error_detail("missing_logo_file", "Logo upload must include a file field"),
+    )
+
+
 def logo_directory() -> Path:
     directory = get_settings().upload_dir / "logos"
     directory.mkdir(parents=True, exist_ok=True)
@@ -153,12 +185,26 @@ def update_company_settings(
 
 
 @router.post("/logo", response_model=CompanySettingsRead, summary="Upload company logo")
-def upload_company_logo(
-    file: Annotated[UploadFile, File(...)],
+async def upload_company_logo(
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
 ) -> CompanySettingsRead:
-    content = file.file.read(get_settings().max_logo_upload_bytes + 1)
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > get_settings().max_logo_upload_bytes + 65536:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=error_detail("logo_too_large", "Logo file exceeds the configured size limit"),
+                )
+        except ValueError:
+            pass
+
+    content = extract_multipart_file(
+        request.headers.get("content-type"),
+        await request.body(),
+    )
     if not content:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: payroll_os
+      POSTGRES_USER: payroll_user
+      POSTGRES_PASSWORD: payroll_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payroll_user -d payroll_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg2://payroll_user:payroll_password@postgres:5432/payroll_os
+      SECRET_KEY: dev-only-local-docker-secret-change-before-production
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
+      BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+      BOOTSTRAP_ADMIN_PASSWORD: Admin@2026!Local
+      BOOTSTRAP_ADMIN_NAME: Admin User
+      UPLOAD_DIR: /app/backend/uploads
+      UPLOAD_URL_PATH: /uploads
+    ports:
+      - "8080:80"
+    volumes:
+      - uploads:/app/backend/uploads
+
+volumes:
+  postgres_data:
+  uploads:

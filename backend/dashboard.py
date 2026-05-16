@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
 try:
@@ -176,6 +176,127 @@ def build_attendance_summary(
     )
 
 
+def build_monthly_attendance_rows(
+    db: Session,
+    *,
+    period_start: date_type,
+    period_end: date_type,
+) -> list[dict[str, object]]:
+    rows = db.execute(
+        select(
+            Employee.id.label("employee_id"),
+            Employee.full_name.label("employee_name"),
+            Employee.department.label("department"),
+            func.count(AttendanceEntry.id).label("working_days"),
+            func.coalesce(
+                func.sum(case((AttendanceEntry.status == AttendanceStatus.PRESENT, 1), else_=0)),
+                0,
+            ).label("present_count"),
+            func.coalesce(
+                func.sum(case((AttendanceEntry.status == AttendanceStatus.LATE, 1), else_=0)),
+                0,
+            ).label("late_count"),
+            func.coalesce(
+                func.sum(case((AttendanceEntry.status == AttendanceStatus.ABSENT, 1), else_=0)),
+                0,
+            ).label("absent_count"),
+        )
+        .outerjoin(
+            AttendanceEntry,
+            and_(
+                AttendanceEntry.employee_id == Employee.id,
+                AttendanceEntry.work_date >= period_start,
+                AttendanceEntry.work_date <= period_end,
+            ),
+        )
+        .group_by(Employee.id)
+        .order_by(Employee.full_name.asc())
+    ).all()
+
+    return [
+        {
+            "employee_id": str(row.employee_id),
+            "employee_name": row.employee_name,
+            "name": row.employee_name,
+            "department": row.department,
+            "working_days": integer_count(row.working_days),
+            "present": integer_count(row.present_count),
+            "present_count": integer_count(row.present_count),
+            "late": integer_count(row.late_count),
+            "late_count": integer_count(row.late_count),
+            "absent": integer_count(row.absent_count),
+            "absent_count": integer_count(row.absent_count),
+        }
+        for row in rows
+    ]
+
+
+@router.get(
+    "/dashboard/daily-attendance",
+    summary="Summarize daily attendance",
+    include_in_schema=False,
+)
+def read_daily_attendance_summary(
+    attendance_date: Annotated[date_type, Query(alias="date")],
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, object]:
+    summary = build_attendance_summary(
+        db,
+        period_start=attendance_date,
+        period_end=attendance_date,
+    )
+    active_employee_count = db.scalar(
+        select(func.count(Employee.id)).where(Employee.is_active.is_(True))
+    ) or 0
+
+    return {
+        "date": attendance_date.isoformat(),
+        "total_employees": integer_count(active_employee_count),
+        "total_workforce": integer_count(active_employee_count),
+        "total_entries": summary.total_entries,
+        "present_count": summary.present_count,
+        "present": summary.present_count,
+        "late_count": summary.late_count,
+        "late": summary.late_count,
+        "absent_count": summary.absent_count,
+        "absent": summary.absent_count,
+        "pending_count": summary.pending_count,
+        "pending": summary.pending_count,
+    }
+
+
+@router.get(
+    "/dashboard/monthly-attendance",
+    summary="Summarize monthly attendance by employee",
+    include_in_schema=False,
+)
+def read_monthly_attendance_summary(
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+    month: Annotated[str | None, Query(min_length=7, max_length=7)] = None,
+    month_year: Annotated[str | None, Query(min_length=7, max_length=7)] = None,
+) -> dict[str, object]:
+    resolved_month, period_start, period_end = parse_dashboard_month(month, month_year)
+    rows = build_monthly_attendance_rows(
+        db,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    return {
+        "month_year": resolved_month,
+        "items": rows,
+        "rows": rows,
+        "employees": rows,
+    }
+
+
+@router.get(
+    "/dashboard/monthly-payroll",
+    response_model=MonthlyPayrollSummaryRead,
+    summary="Summarize locked payroll totals for a month",
+    include_in_schema=False,
+)
 @router.get(
     "/monthly-payroll",
     response_model=MonthlyPayrollSummaryRead,

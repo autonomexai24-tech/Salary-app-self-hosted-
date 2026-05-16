@@ -201,6 +201,12 @@ def read_attendance_entry(
     return attendance_entry_response(entry)
 
 
+@router.post(
+    "/log",
+    response_model=AttendanceEntryRead,
+    summary="Create or update daily attendance",
+    include_in_schema=False,
+)
 @router.post("", response_model=AttendanceEntryRead, summary="Create or update daily attendance")
 def upsert_attendance_entry(
     payload: AttendanceEntryUpsert,

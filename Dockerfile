@@ -14,7 +14,7 @@ RUN npm run build
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
-    APP_ENV=production \
+    APP_ENV=development \
     UPLOAD_DIR=/app/backend/uploads
 
 WORKDIR /app

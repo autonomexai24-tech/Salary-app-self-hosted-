@@ -3,21 +3,26 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-import bcrypt
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 try:
-    from .database import Base, get_engine
+    from .database import Base, get_engine, get_settings
     from . import models  # noqa: F401
+    from .schemas import UserCreate
+    from .security import hash_password
 except ImportError:
-    from database import Base, get_engine
+    from database import Base, get_engine, get_settings
     import models  # noqa: F401
+    from schemas import UserCreate
+    from security import hash_password
 
 
-DEFAULT_ADMIN_EMAIL = "resume"
-DEFAULT_ADMIN_PASSWORD = "resume123"
-DEFAULT_ADMIN_NAME = "Admin"
+INSECURE_BOOTSTRAP_ADMIN_PASSWORDS = {
+    "Admin@2026!Local",
+    "replace-with-a-strong-password",
+}
 
 
 def apply_schema_updates(connection) -> None:
@@ -173,27 +178,33 @@ def seed_default_admin(connection) -> None:
     if count and count > 0:
         return
 
-    hashed = bcrypt.hashpw(
-        DEFAULT_ADMIN_PASSWORD.encode("utf-8"),
-        bcrypt.gensalt(rounds=12),
-    ).decode("utf-8")
+    settings = get_settings()
+    if (
+        settings.is_production
+        and settings.bootstrap_admin_password in INSECURE_BOOTSTRAP_ADMIN_PASSWORDS
+    ):
+        raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD must be replaced before seeding a production admin")
+
+    admin = UserCreate(
+        email=settings.bootstrap_admin_email,
+        full_name=settings.bootstrap_admin_name,
+        password=settings.bootstrap_admin_password,
+    )
+    password_hash = hash_password(admin.password)
     now = datetime.now(timezone.utc)
     connection.execute(
-        text(
-            """
-            INSERT INTO users (id, email, hashed_password, full_name, role, is_active, created_at, updated_at)
-            VALUES (:id, :email, :hashed_password, :full_name, 'admin', true, :now, :now)
-            """
-        ),
-        {
-            "id": str(uuid.uuid4()),
-            "email": DEFAULT_ADMIN_EMAIL,
-            "hashed_password": hashed,
-            "full_name": DEFAULT_ADMIN_NAME,
-            "now": now,
-        },
+        models.User.__table__.insert().values(
+            id=uuid.uuid4(),
+            email=admin.email,
+            password_hash=password_hash,
+            full_name=admin.full_name,
+            role=models.UserRole.ADMIN,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+        )
     )
-    print(f"Default admin user created: {DEFAULT_ADMIN_EMAIL}")
+    print(f"Default admin user created: {admin.email}")
 
 
 def init_db() -> None:
@@ -204,7 +215,7 @@ def init_db() -> None:
             Base.metadata.create_all(bind=connection)
             apply_schema_updates(connection)
             seed_default_admin(connection)
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, ValidationError, ValueError) as exc:
         raise RuntimeError("Database initialization failed") from exc
 
 

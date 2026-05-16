@@ -1,7 +1,16 @@
 #!/bin/sh
 set -eu
 
-python -m backend.init_db
+attempt=1
+until python -m backend.init_db; do
+  if [ "$attempt" -ge 30 ]; then
+    echo "Database initialization failed after $attempt attempts"
+    exit 1
+  fi
+  echo "Database is not ready; retrying init_db ($attempt/30)"
+  attempt=$((attempt + 1))
+  sleep 2
+done
 
 uvicorn backend.main:app --host 127.0.0.1 --port 8000 &
 api_pid="$!"
