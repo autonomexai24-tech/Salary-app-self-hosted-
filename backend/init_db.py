@@ -29,6 +29,7 @@ def apply_schema_updates(connection) -> None:
     if connection.dialect.name != "postgresql":
         return
 
+    connection.execute(text("ALTER TYPE attendance_status ADD VALUE IF NOT EXISTS 'late'"))
     connection.execute(text("ALTER TYPE attendance_status ADD VALUE IF NOT EXISTS 'leave'"))
     connection.execute(
         text(
@@ -381,18 +382,88 @@ def apply_schema_updates(connection) -> None:
         text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS hours_logged NUMERIC(7, 2) DEFAULT 0.00")
     )
     connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS regular_hours NUMERIC(7, 2) DEFAULT 0.00")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS overtime_hours NUMERIC(7, 2) DEFAULT 0.00")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS late_minutes INTEGER DEFAULT 0")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS penalty_amount NUMERIC(14, 2) DEFAULT 0.00")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS advance_amount NUMERIC(14, 2) DEFAULT 0.00")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS gross_earned NUMERIC(14, 2) DEFAULT 0.00")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS net_earned NUMERIC(14, 2) DEFAULT 0.00")
+    )
+    connection.execute(
+        text("ALTER TABLE attendance_entries ADD COLUMN IF NOT EXISTS notes TEXT")
+    )
+    connection.execute(
         text(
             """
+            WITH company_rules AS (
+                SELECT
+                    COALESCE((SELECT standard_work_hours FROM company_settings WHERE id = 1), 8.00) AS standard_work_hours,
+                    COALESCE((SELECT shift_start_time FROM company_settings WHERE id = 1), '09:00'::time) AS shift_start_time,
+                    COALESCE((SELECT grace_period_minutes FROM company_settings WHERE id = 1), 10) AS grace_period_minutes
+            ),
+            calculated AS (
+                SELECT
+                    attendance_entries.id,
+                    CASE
+                        WHEN attendance_entries.time_in IS NOT NULL
+                            AND attendance_entries.time_out IS NOT NULL
+                            AND attendance_entries.time_out > attendance_entries.time_in
+                            THEN ROUND(EXTRACT(EPOCH FROM (attendance_entries.time_out - attendance_entries.time_in)) / 3600.0, 2)
+                        ELSE COALESCE(attendance_entries.hours_logged, 0.00)
+                    END AS worked_hours,
+                    CASE
+                        WHEN attendance_entries.time_in IS NOT NULL
+                            THEN GREATEST(
+                                CEIL(
+                                    EXTRACT(EPOCH FROM (
+                                        attendance_entries.time_in
+                                        - (company_rules.shift_start_time + company_rules.grace_period_minutes * INTERVAL '1 minute')
+                                    )) / 60.0
+                                ),
+                                0
+                            )::integer
+                        ELSE COALESCE(attendance_entries.late_minutes, 0)
+                    END AS calculated_late_minutes,
+                    company_rules.standard_work_hours
+                FROM attendance_entries
+                CROSS JOIN company_rules
+            )
             UPDATE attendance_entries
-            SET hours_logged = CASE
-                WHEN time_in IS NOT NULL AND time_out IS NOT NULL AND time_out > time_in
-                    THEN ROUND(EXTRACT(EPOCH FROM (time_out - time_in)) / 3600.0, 2)
-                ELSE COALESCE(hours_logged, 0.00)
-            END
+            SET
+                hours_logged = calculated.worked_hours,
+                regular_hours = LEAST(calculated.worked_hours, calculated.standard_work_hours),
+                overtime_hours = GREATEST(calculated.worked_hours - calculated.standard_work_hours, 0.00),
+                late_minutes = calculated.calculated_late_minutes,
+                penalty_amount = COALESCE(attendance_entries.penalty_amount, 0.00),
+                advance_amount = COALESCE(attendance_entries.advance_amount, 0.00),
+                gross_earned = COALESCE(attendance_entries.gross_earned, 0.00),
+                net_earned = COALESCE(attendance_entries.net_earned, 0.00)
+            FROM calculated
+            WHERE attendance_entries.id = calculated.id
             """
         )
     )
     connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN hours_logged SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN regular_hours SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN overtime_hours SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN late_minutes SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN penalty_amount SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN advance_amount SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN gross_earned SET NOT NULL"))
+    connection.execute(text("ALTER TABLE attendance_entries ALTER COLUMN net_earned SET NOT NULL"))
     connection.execute(
         text(
             """
@@ -404,6 +475,98 @@ def apply_schema_updates(connection) -> None:
             EXCEPTION
                 WHEN duplicate_object THEN NULL;
             END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE attendance_entries
+                ADD CONSTRAINT ck_attendance_entries_attendance_regular_hours_non_negative
+                CHECK (regular_hours >= 0);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE attendance_entries
+                ADD CONSTRAINT ck_attendance_entries_attendance_overtime_hours_non_negative
+                CHECK (overtime_hours >= 0);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE attendance_entries
+                ADD CONSTRAINT ck_attendance_entries_attendance_late_minutes_non_negative
+                CHECK (late_minutes >= 0);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE attendance_entries
+                ADD CONSTRAINT ck_attendance_entries_attendance_penalty_non_negative
+                CHECK (penalty_amount >= 0);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE attendance_entries
+                ADD CONSTRAINT ck_attendance_entries_attendance_advance_non_negative
+                CHECK (advance_amount >= 0);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE attendance_entries
+                ADD CONSTRAINT uq_attendance_employee_work_date
+                UNIQUE (employee_id, work_date);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_attendance_entries_work_date_status
+            ON attendance_entries (work_date, status)
             """
         )
     )
