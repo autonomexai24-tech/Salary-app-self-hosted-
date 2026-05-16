@@ -7,7 +7,8 @@ COPY package.json package-lock.json ./
 RUN npm install
 
 COPY . .
-ENV VITE_API_BASE_URL=""
+ARG VITE_API_URL
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 FROM python:3.12-slim AS runtime

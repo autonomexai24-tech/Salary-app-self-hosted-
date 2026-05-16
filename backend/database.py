@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080"
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=10, ge=0, le=100)
-    jwt_secret_key: str = Field(
+    secret_key: str = Field(
         default="dev-only-replace-this-jwt-secret-before-production",
         min_length=32,
     )
@@ -42,8 +42,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Settings:
-        if self.is_production and self.jwt_secret_key.startswith("dev-only-"):
-            raise ValueError("JWT_SECRET_KEY must be replaced in production")
+        if self.is_production and self.secret_key.startswith("dev-only-"):
+            raise ValueError("SECRET_KEY must be replaced in production")
         return self
 
     @property
