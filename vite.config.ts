@@ -11,6 +11,16 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
+    proxy: {
+      "/api": {
+        target: process.env.VITE_DEV_API_PROXY_TARGET ?? "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/uploads": {
+        target: process.env.VITE_DEV_API_PROXY_TARGET ?? "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
