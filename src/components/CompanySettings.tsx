@@ -14,10 +14,24 @@ import { cn } from "@/lib/utils";
 import { COMPANY_FIXED_SHIFT, GRACE_PERIOD_MINUTES } from "@/lib/payroll-config";
 import {
   apiErrorMessage,
+  createDepartment,
+  createDesignation,
+  createHoliday,
+  dateInputValue,
+  deleteDepartment,
+  deleteDesignation,
+  deleteHoliday,
+  listDepartments,
+  listDesignations,
+  listHolidays,
   readCompanySettings,
+  readLeavePolicy,
   resolveApiAssetUrl,
   updateCompanySettings,
+  updateLeavePolicy,
   uploadCompanyLogo,
+  type BackendHoliday,
+  type BackendSettingsCatalogItem,
 } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -32,6 +46,23 @@ interface CompanySettingsProps {
   setDesignations: React.Dispatch<React.SetStateAction<string[]>>;
   departments: string[];
   setDepartments: React.Dispatch<React.SetStateAction<string[]>>;
+}
+
+function dateFromApiValue(value: string): Date {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function mapHoliday(record: BackendHoliday): Holiday {
+  return {
+    id: record.id,
+    date: dateFromApiValue(record.date),
+    name: record.name,
+  };
+}
+
+function catalogNames(records: BackendSettingsCatalogItem[]): string[] {
+  return records.map((record) => record.name);
 }
 
 export default function CompanySettings({
@@ -50,6 +81,9 @@ export default function CompanySettings({
   const [annualLeaves, setAnnualLeaves] = useState("12");
   const [monthlyAccrual, setMonthlyAccrual] = useState("1");
   const [unusedLeaveAction, setUnusedLeaveAction] = useState("carry_forward");
+  const [defaultLeaveBalance, setDefaultLeaveBalance] = useState("0");
+  const [overtimeMultiplier, setOvertimeMultiplier] = useState("1");
+  const [latePenaltyPerMinute, setLatePenaltyPerMinute] = useState("0");
 
   // Holiday Calendar
   const [holidays, setHolidays] = useState<Holiday[]>([]);
@@ -67,6 +101,18 @@ export default function CompanySettings({
   // Designation & Department inputs
   const [newDesignation, setNewDesignation] = useState("");
   const [newDepartment, setNewDepartment] = useState("");
+  const [designationRecords, setDesignationRecords] = useState<BackendSettingsCatalogItem[]>([]);
+  const [departmentRecords, setDepartmentRecords] = useState<BackendSettingsCatalogItem[]>([]);
+
+  const syncDesignations = (records: BackendSettingsCatalogItem[]) => {
+    setDesignationRecords(records);
+    setDesignations(catalogNames(records));
+  };
+
+  const syncDepartments = (records: BackendSettingsCatalogItem[]) => {
+    setDepartmentRecords(records);
+    setDepartments(catalogNames(records));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -89,10 +135,65 @@ export default function CompanySettings({
         });
       });
 
+    readLeavePolicy()
+      .then((policy) => {
+        if (cancelled) return;
+        setAnnualLeaves(String(Number(policy.annual_paid_leaves)));
+        setMonthlyAccrual(String(Number(policy.monthly_leave_accrual)));
+        setUnusedLeaveAction(policy.unused_leave_action);
+        setDefaultLeaveBalance(String(Number(policy.default_leave_balance)));
+        setOvertimeMultiplier(String(Number(policy.overtime_multiplier)));
+        setLatePenaltyPerMinute(String(Number(policy.late_penalty_per_minute)));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load leave policy", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    listHolidays()
+      .then((records) => {
+        if (cancelled) return;
+        setHolidays(records.map(mapHoliday));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load holidays", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    listDesignations()
+      .then((records) => {
+        if (cancelled) return;
+        setDesignationRecords(records);
+        setDesignations(catalogNames(records));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load designations", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    listDepartments()
+      .then((records) => {
+        if (cancelled) return;
+        setDepartmentRecords(records);
+        setDepartments(catalogNames(records));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load departments", {
+          description: apiErrorMessage(error),
+        });
+      });
+
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setDepartments, setDesignations]);
 
   const formatShiftLabel = (time: string) => {
     if (!time) return "";
@@ -110,30 +211,60 @@ export default function CompanySettings({
     return formatShiftLabel(`${String(nh).padStart(2, "0")}:${String(nm).padStart(2, "0")}`);
   }, [shiftStart, gracePeriod]);
 
-  const addDesignation = () => {
+  const addDesignation = async () => {
     const val = newDesignation.trim();
-    if (val && !designations.includes(val)) {
-      setDesignations((prev) => [...prev, val]);
+    if (!val || designations.includes(val)) return;
+
+    try {
+      const created = await createDesignation(val);
+      const nextRecords = [
+        ...designationRecords.filter((record) => record.id !== created.id),
+        created,
+      ];
+      syncDesignations(nextRecords);
       setNewDesignation("");
+    } catch (error) {
+      toast.error("Could not save designation", {
+        description: apiErrorMessage(error),
+      });
     }
   };
 
-  const addDepartment = () => {
+  const addDepartment = async () => {
     const val = newDepartment.trim();
-    if (val && !departments.includes(val)) {
-      setDepartments((prev) => [...prev, val]);
+    if (!val || departments.includes(val)) return;
+
+    try {
+      const created = await createDepartment(val);
+      const nextRecords = [
+        ...departmentRecords.filter((record) => record.id !== created.id),
+        created,
+      ];
+      syncDepartments(nextRecords);
       setNewDepartment("");
+    } catch (error) {
+      toast.error("Could not save department", {
+        description: apiErrorMessage(error),
+      });
     }
   };
 
-  const addHoliday = () => {
+  const addHoliday = async () => {
     if (!holidayDate || !holidayName.trim()) return;
-    setHolidays((prev) => [
-      ...prev,
-      { id: `h${Date.now()}`, date: holidayDate, name: holidayName.trim() },
-    ]);
-    setHolidayDate(undefined);
-    setHolidayName("");
+
+    try {
+      const created = await createHoliday({
+        date: dateInputValue(holidayDate),
+        name: holidayName.trim(),
+      });
+      setHolidays((prev) => [...prev, mapHoliday(created)]);
+      setHolidayDate(undefined);
+      setHolidayName("");
+    } catch (error) {
+      toast.error("Could not save holiday", {
+        description: apiErrorMessage(error),
+      });
+    }
   };
 
   const saveMasterTimings = async () => {
@@ -174,6 +305,34 @@ export default function CompanySettings({
     }
   };
 
+  const saveLeaveRules = async () => {
+    try {
+      const policy = await updateLeavePolicy({
+        annual_paid_leaves: Number(annualLeaves) || 0,
+        monthly_leave_accrual: Number(monthlyAccrual) || 0,
+        unused_leave_action: unusedLeaveAction,
+        default_leave_balance: Number(defaultLeaveBalance) || 0,
+        overtime_multiplier: Number(overtimeMultiplier) || 0,
+        late_penalty_per_minute: Number(latePenaltyPerMinute) || 0,
+        shift_start_time: shiftStart,
+        shift_end_time: shiftEnd,
+        standard_work_hours: Number(workingHours) || COMPANY_FIXED_SHIFT.totalHours,
+        grace_period_minutes: Number(gracePeriod) || 0,
+      });
+      setAnnualLeaves(String(Number(policy.annual_paid_leaves)));
+      setMonthlyAccrual(String(Number(policy.monthly_leave_accrual)));
+      setUnusedLeaveAction(policy.unused_leave_action);
+      setDefaultLeaveBalance(String(Number(policy.default_leave_balance)));
+      setOvertimeMultiplier(String(Number(policy.overtime_multiplier)));
+      setLatePenaltyPerMinute(String(Number(policy.late_penalty_per_minute)));
+      toast.success("Leave rules saved");
+    } catch (error) {
+      toast.error("Could not save leave rules", {
+        description: apiErrorMessage(error),
+      });
+    }
+  };
+
   const handleLogoFile = async (file: File) => {
     const previousLogo = logoPreview;
     const localPreviewUrl = URL.createObjectURL(file);
@@ -196,6 +355,53 @@ export default function CompanySettings({
     () => [...holidays].sort((a, b) => a.date.getTime() - b.date.getTime()),
     [holidays]
   );
+
+  const removeHoliday = async (holiday: Holiday) => {
+    const previousHolidays = holidays;
+    setHolidays((prev) => prev.filter((item) => item.id !== holiday.id));
+    try {
+      await deleteHoliday(holiday.id);
+    } catch (error) {
+      setHolidays(previousHolidays);
+      toast.error("Could not delete holiday", {
+        description: apiErrorMessage(error),
+      });
+    }
+  };
+
+  const removeDesignation = async (name: string) => {
+    const record = designationRecords.find((item) => item.name === name);
+    if (!record) {
+      setDesignations((prev) => prev.filter((item) => item !== name));
+      return;
+    }
+
+    try {
+      await deleteDesignation(record.id);
+      syncDesignations(designationRecords.filter((item) => item.id !== record.id));
+    } catch (error) {
+      toast.error("Could not delete designation", {
+        description: apiErrorMessage(error),
+      });
+    }
+  };
+
+  const removeDepartment = async (name: string) => {
+    const record = departmentRecords.find((item) => item.name === name);
+    if (!record) {
+      setDepartments((prev) => prev.filter((item) => item !== name));
+      return;
+    }
+
+    try {
+      await deleteDepartment(record.id);
+      syncDepartments(departmentRecords.filter((item) => item.id !== record.id));
+    } catch (error) {
+      toast.error("Could not delete department", {
+        description: apiErrorMessage(error),
+      });
+    }
+  };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -273,7 +479,7 @@ export default function CompanySettings({
                 </SelectContent>
               </Select>
             </div>
-            <Button className="w-full mt-2" size="sm" onClick={() => toast.info("Leave policy storage is not available on the backend yet.")}>
+            <Button className="w-full mt-2" size="sm" onClick={saveLeaveRules}>
               <Save className="h-3.5 w-3.5 mr-1.5" />
               Save Leave Rules
             </Button>
@@ -387,7 +593,7 @@ export default function CompanySettings({
                   <span className="font-medium">–</span>
                   <span>{h.name}</span>
                   <button
-                    onClick={() => setHolidays((prev) => prev.filter((x) => x.id !== h.id))}
+                    onClick={() => removeHoliday(h)}
                     className="ml-0.5 rounded-full p-0.5 hover:bg-foreground/10 transition-colors"
                   >
                     <X className="h-2.5 w-2.5" />
@@ -425,7 +631,7 @@ export default function CompanySettings({
                 <Badge key={d} variant="secondary" className="pl-2.5 pr-1 py-1 text-xs gap-1">
                   {d}
                   <button
-                    onClick={() => setDesignations((prev) => prev.filter((x) => x !== d))}
+                    onClick={() => removeDesignation(d)}
                     className="ml-0.5 rounded-full p-0.5 hover:bg-foreground/10 transition-colors"
                   >
                     <X className="h-2.5 w-2.5" />
@@ -460,7 +666,7 @@ export default function CompanySettings({
                 <Badge key={d} variant="secondary" className="pl-2.5 pr-1 py-1 text-xs gap-1">
                   {d}
                   <button
-                    onClick={() => setDepartments((prev) => prev.filter((x) => x !== d))}
+                    onClick={() => removeDepartment(d)}
                     className="ml-0.5 rounded-full p-0.5 hover:bg-foreground/10 transition-colors"
                   >
                     <X className="h-2.5 w-2.5" />

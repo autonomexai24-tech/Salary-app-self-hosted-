@@ -13,13 +13,29 @@ WORK_HOURS_PER_DAY = Decimal("8")
 class RateBreakdown:
     daily_rate: Decimal
     hourly_rate: Decimal
+    minute_rate: Decimal
 
 
 def money(value: Decimal) -> Decimal:
     return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
 
 
-def calculate_rates(monthly_basic: Decimal | int | str) -> RateBreakdown:
+def positive_decimal(value: Decimal | int | str, *, field_name: str) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a valid decimal amount") from exc
+
+    if amount <= 0:
+        raise ValueError(f"{field_name} must be greater than zero")
+    return amount
+
+
+def calculate_rates(
+    monthly_basic: Decimal | int | str,
+    working_days_per_month: Decimal | int | str = WORK_DAYS_PER_MONTH,
+    working_hours_per_day: Decimal | int | str = WORK_HOURS_PER_DAY,
+) -> RateBreakdown:
     try:
         monthly_amount = Decimal(str(monthly_basic))
     except (InvalidOperation, ValueError) as exc:
@@ -28,6 +44,10 @@ def calculate_rates(monthly_basic: Decimal | int | str) -> RateBreakdown:
     if monthly_amount < 0:
         raise ValueError("Monthly basic cannot be negative")
 
-    daily_rate = money(monthly_amount / WORK_DAYS_PER_MONTH)
-    hourly_rate = money(monthly_amount / WORK_DAYS_PER_MONTH / WORK_HOURS_PER_DAY)
-    return RateBreakdown(daily_rate=daily_rate, hourly_rate=hourly_rate)
+    working_days = positive_decimal(working_days_per_month, field_name="Working days per month")
+    working_hours = positive_decimal(working_hours_per_day, field_name="Working hours per day")
+
+    daily_rate = money(monthly_amount / working_days)
+    hourly_rate = money(daily_rate / working_hours)
+    minute_rate = money(hourly_rate / Decimal("60"))
+    return RateBreakdown(daily_rate=daily_rate, hourly_rate=hourly_rate, minute_rate=minute_rate)

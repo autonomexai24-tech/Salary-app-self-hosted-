@@ -31,6 +31,10 @@ export interface AttendanceEntry {
   timeIn: string;
   timeOut: string;
   advance: number;
+  status: "pending" | "present" | "absent" | "leave" | "late";
+  hoursLogged: number;
+  overtimeHours: number;
+  lateMinutes: number;
 }
 
 export type BackendRole = "admin" | "staff";
@@ -57,11 +61,17 @@ export interface BackendEmployee {
   id: string;
   employee_code: string;
   full_name: string;
+  phone_number?: string | null;
   department: string;
   designation: string;
   monthly_basic: string | number;
+  joining_date: string;
+  working_days_per_month: string | number;
+  working_hours_per_day: string | number;
+  leave_balance: string | number;
   daily_rate: string | number;
   hourly_rate: string | number;
+  minute_rate: string | number;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -72,6 +82,12 @@ export interface BackendEmployeeList {
   limit: number;
   offset: number;
   total: number;
+}
+
+export interface BackendEmployeeRatePreview {
+  daily_rate: string | number;
+  hourly_rate: string | number;
+  minute_rate: string | number;
 }
 
 export interface BackendUserList {
@@ -87,7 +103,8 @@ export interface BackendAttendanceEntry {
   date: string;
   time_in?: string | null;
   time_out?: string | null;
-  status: "pending" | "present" | "absent" | "late";
+  status: "pending" | "present" | "absent" | "leave" | "late";
+  hours_logged: string | number;
   regular_hours: string | number;
   overtime_hours: string | number;
   late_minutes: number;
@@ -114,16 +131,68 @@ export interface BackendCompanySettings {
   phone?: string | null;
   email?: string | null;
   tax_id?: string | null;
+  timezone?: string;
+  currency?: string;
   shift_start_time: string;
   shift_end_time: string;
   standard_work_hours: string | number;
   grace_period_minutes: number;
   overtime_multiplier: string | number;
+  working_days_per_month?: string | number;
+  payroll_cycle?: string;
+  payroll_day?: number;
+  annual_paid_leaves?: string | number;
+  monthly_leave_accrual?: string | number;
+  unused_leave_action?: string;
+  default_leave_balance?: string | number;
+  late_penalty_per_minute?: string | number;
   logo_url?: string | null;
   logo_content_type?: string | null;
   logo_updated_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface BackendLeavePolicy {
+  id: number;
+  annual_paid_leaves: string | number;
+  monthly_leave_accrual: string | number;
+  unused_leave_action: string;
+  default_leave_balance: string | number;
+  overtime_multiplier: string | number;
+  late_penalty_per_minute: string | number;
+  shift_start_time: string;
+  shift_end_time: string;
+  standard_work_hours: string | number;
+  grace_period_minutes: number;
+  updated_at: string;
+}
+
+export interface BackendSettingsCatalogItem {
+  id: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BackendSettingsCatalogList {
+  items: BackendSettingsCatalogItem[];
+  total: number;
+}
+
+export interface BackendHoliday {
+  id: string;
+  date: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BackendHolidayList {
+  items: BackendHoliday[];
+  total: number;
 }
 
 export interface BackendPayrollLine {
@@ -176,8 +245,13 @@ export interface BackendDailyAttendanceSummary {
   late?: number;
   absent_count?: number;
   absent?: number;
+  leave_count?: number;
+  leave?: number;
   pending_count?: number;
   pending?: number;
+  total_hours_logged?: string | number;
+  total_regular_hours?: string | number;
+  total_overtime_hours?: string | number;
 }
 
 export interface BackendMonthlyAttendanceRow {
@@ -192,6 +266,10 @@ export interface BackendMonthlyAttendanceRow {
   absent_count?: number;
   late?: number;
   late_count?: number;
+  leave?: number;
+  leave_count?: number;
+  total_hours_logged?: string | number;
+  total_overtime_hours?: string | number;
 }
 
 export interface BackendMonthlyAttendanceSummary {
@@ -323,11 +401,48 @@ export async function listEmployees(search?: string): Promise<BackendEmployee[]>
   return data.items;
 }
 
+export async function listEmployeesWithFilters(filters: Partial<{
+  search: string;
+  department: string;
+  designation: string;
+  isActive: boolean;
+  includeInactive: boolean;
+}> = {}): Promise<BackendEmployee[]> {
+  const params = new URLSearchParams({ limit: "100", offset: "0" });
+  if (filters.search?.trim()) params.set("search", filters.search.trim());
+  if (filters.department?.trim()) params.set("department", filters.department.trim());
+  if (filters.designation?.trim()) params.set("designation", filters.designation.trim());
+  if (filters.isActive !== undefined) params.set("is_active", String(filters.isActive));
+  if (filters.includeInactive) params.set("include_inactive", "true");
+  const data = await jsonRequest<BackendEmployeeList>(`/api/employees/?${params.toString()}`);
+  return data.items;
+}
+
+export async function previewEmployeeRates(payload: {
+  monthlyBasic: number;
+  workingDaysPerMonth: number;
+  workingHoursPerDay?: number;
+}): Promise<BackendEmployeeRatePreview> {
+  return jsonRequest<BackendEmployeeRatePreview>("/api/employees/rates/preview", {
+    method: "POST",
+    body: JSON.stringify({
+      monthly_basic: payload.monthlyBasic,
+      working_days_per_month: payload.workingDaysPerMonth,
+      working_hours_per_day: payload.workingHoursPerDay ?? 8,
+    }),
+  });
+}
+
 export async function createEmployee(payload: {
   fullName: string;
+  phoneNumber?: string;
   department: string;
   designation: string;
   monthlyBasic: number;
+  workingDaysPerMonth?: number;
+  workingHoursPerDay?: number;
+  joiningDate?: string;
+  leaveBalance?: number;
   employeeCode?: string;
 }): Promise<BackendEmployee> {
   const employeeCode = payload.employeeCode ?? `${initialsFromName(payload.fullName) || "EMP"}${Date.now()}`;
@@ -336,16 +451,73 @@ export async function createEmployee(payload: {
     body: JSON.stringify({
       employee_code: employeeCode,
       full_name: payload.fullName,
+      phone_number: payload.phoneNumber?.trim() || null,
       department: payload.department,
       designation: payload.designation,
       monthly_basic: payload.monthlyBasic,
+      ...(payload.workingDaysPerMonth ? { working_days_per_month: payload.workingDaysPerMonth } : {}),
+      ...(payload.workingHoursPerDay ? { working_hours_per_day: payload.workingHoursPerDay } : {}),
+      ...(payload.joiningDate ? { joining_date: payload.joiningDate } : {}),
+      ...(payload.leaveBalance !== undefined ? { leave_balance: payload.leaveBalance } : {}),
       is_active: true,
     }),
   });
 }
 
+export async function updateEmployee(id: string, payload: Partial<{
+  employeeCode: string;
+  fullName: string;
+  phoneNumber: string;
+  department: string;
+  designation: string;
+  monthlyBasic: number;
+  workingDaysPerMonth: number;
+  workingHoursPerDay: number;
+  joiningDate: string;
+  leaveBalance: number;
+  isActive: boolean;
+}>): Promise<BackendEmployee> {
+  return jsonRequest<BackendEmployee>(`/api/employees/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      ...(payload.employeeCode !== undefined ? { employee_code: payload.employeeCode } : {}),
+      ...(payload.fullName !== undefined ? { full_name: payload.fullName } : {}),
+      ...(payload.phoneNumber !== undefined ? { phone_number: payload.phoneNumber } : {}),
+      ...(payload.department !== undefined ? { department: payload.department } : {}),
+      ...(payload.designation !== undefined ? { designation: payload.designation } : {}),
+      ...(payload.monthlyBasic !== undefined ? { monthly_basic: payload.monthlyBasic } : {}),
+      ...(payload.workingDaysPerMonth !== undefined ? { working_days_per_month: payload.workingDaysPerMonth } : {}),
+      ...(payload.workingHoursPerDay !== undefined ? { working_hours_per_day: payload.workingHoursPerDay } : {}),
+      ...(payload.joiningDate !== undefined ? { joining_date: payload.joiningDate } : {}),
+      ...(payload.leaveBalance !== undefined ? { leave_balance: payload.leaveBalance } : {}),
+      ...(payload.isActive !== undefined ? { is_active: payload.isActive } : {}),
+    }),
+  });
+}
+
+export async function deactivateEmployee(id: string): Promise<BackendEmployee> {
+  return jsonRequest<BackendEmployee>(`/api/employees/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function restoreEmployee(id: string): Promise<BackendEmployee> {
+  return jsonRequest<BackendEmployee>(`/api/employees/${encodeURIComponent(id)}/restore`, {
+    method: "POST",
+  });
+}
+
 export function emptyAttendanceEntry(employeeId: string): AttendanceEntry {
-  return { employeeId, timeIn: "", timeOut: "", advance: 0 };
+  return {
+    employeeId,
+    timeIn: "",
+    timeOut: "",
+    advance: 0,
+    status: "pending",
+    hoursLogged: 0,
+    overtimeHours: 0,
+    lateMinutes: 0,
+  };
 }
 
 export function mapAttendanceEntryToUi(entry: BackendAttendanceEntry): AttendanceEntry {
@@ -354,11 +526,20 @@ export function mapAttendanceEntryToUi(entry: BackendAttendanceEntry): Attendanc
     timeIn: toTimeInputValue(entry.time_in),
     timeOut: toTimeInputValue(entry.time_out),
     advance: numberFromApi(entry.advance_amount),
+    status: entry.status,
+    hoursLogged: numberFromApi(entry.hours_logged),
+    overtimeHours: numberFromApi(entry.overtime_hours),
+    lateMinutes: entry.late_minutes,
   };
 }
 
-export async function listAttendanceEntries(date: string): Promise<BackendAttendanceEntry[]> {
+export async function listAttendanceEntries(date: string, filters: Partial<{
+  employeeId: string;
+  status: BackendAttendanceEntry["status"];
+}> = {}): Promise<BackendAttendanceEntry[]> {
   const params = new URLSearchParams({ date });
+  if (filters.employeeId) params.set("employee_id", filters.employeeId);
+  if (filters.status) params.set("status", filters.status);
   const data = await jsonRequest<BackendAttendanceList>(`/api/attendance/?${params.toString()}`);
   return data.items;
 }
@@ -386,13 +567,45 @@ export async function updateCompanySettings(payload: Partial<{
   phone: string | null;
   email: string | null;
   tax_id: string | null;
+  timezone: string;
+  currency: string;
   shift_start_time: string;
   shift_end_time: string;
   standard_work_hours: number;
   grace_period_minutes: number;
   overtime_multiplier: number;
+  working_days_per_month: number;
+  payroll_cycle: string;
+  payroll_day: number;
+  annual_paid_leaves: number;
+  monthly_leave_accrual: number;
+  unused_leave_action: string;
+  default_leave_balance: number;
+  late_penalty_per_minute: number;
 }>): Promise<BackendCompanySettings> {
   return jsonRequest<BackendCompanySettings>("/api/settings/", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function readLeavePolicy(): Promise<BackendLeavePolicy> {
+  return jsonRequest<BackendLeavePolicy>("/api/settings/leave-policy");
+}
+
+export async function updateLeavePolicy(payload: Partial<{
+  annual_paid_leaves: number;
+  monthly_leave_accrual: number;
+  unused_leave_action: string;
+  default_leave_balance: number;
+  overtime_multiplier: number;
+  late_penalty_per_minute: number;
+  shift_start_time: string;
+  shift_end_time: string;
+  standard_work_hours: number;
+  grace_period_minutes: number;
+}>): Promise<BackendLeavePolicy> {
+  return jsonRequest<BackendLeavePolicy>("/api/settings/leave-policy", {
     method: "PUT",
     body: JSON.stringify(payload),
   });
@@ -404,6 +617,84 @@ export async function uploadCompanyLogo(file: File): Promise<BackendCompanySetti
   return jsonRequest<BackendCompanySettings>("/api/settings/logo", {
     method: "POST",
     body: formData,
+  });
+}
+
+export async function listDepartments(): Promise<BackendSettingsCatalogItem[]> {
+  const data = await jsonRequest<BackendSettingsCatalogList>("/api/settings/departments");
+  return data.items;
+}
+
+export async function createDepartment(name: string): Promise<BackendSettingsCatalogItem> {
+  return jsonRequest<BackendSettingsCatalogItem>("/api/settings/departments", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function updateDepartment(id: string, name: string): Promise<BackendSettingsCatalogItem> {
+  return jsonRequest<BackendSettingsCatalogItem>(`/api/settings/departments/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteDepartment(id: string): Promise<BackendSettingsCatalogItem> {
+  return jsonRequest<BackendSettingsCatalogItem>(`/api/settings/departments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listDesignations(): Promise<BackendSettingsCatalogItem[]> {
+  const data = await jsonRequest<BackendSettingsCatalogList>("/api/settings/designations");
+  return data.items;
+}
+
+export async function createDesignation(name: string): Promise<BackendSettingsCatalogItem> {
+  return jsonRequest<BackendSettingsCatalogItem>("/api/settings/designations", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function updateDesignation(id: string, name: string): Promise<BackendSettingsCatalogItem> {
+  return jsonRequest<BackendSettingsCatalogItem>(`/api/settings/designations/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteDesignation(id: string): Promise<BackendSettingsCatalogItem> {
+  return jsonRequest<BackendSettingsCatalogItem>(`/api/settings/designations/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listHolidays(year?: number): Promise<BackendHoliday[]> {
+  const params = new URLSearchParams();
+  if (year) params.set("year", String(year));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const data = await jsonRequest<BackendHolidayList>(`/api/settings/holidays${suffix}`);
+  return data.items;
+}
+
+export async function createHoliday(payload: { date: string; name: string }): Promise<BackendHoliday> {
+  return jsonRequest<BackendHoliday>("/api/settings/holidays", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateHoliday(id: string, payload: Partial<{ date: string; name: string }>): Promise<BackendHoliday> {
+  return jsonRequest<BackendHoliday>(`/api/settings/holidays/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteHoliday(id: string): Promise<BackendHoliday> {
+  return jsonRequest<BackendHoliday>(`/api/settings/holidays/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
 }
 

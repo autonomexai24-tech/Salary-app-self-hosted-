@@ -143,9 +143,14 @@ def build_attendance_summary(
                 0,
             ).label("absent_count"),
             func.coalesce(
+                func.sum(case((AttendanceEntry.status == AttendanceStatus.LEAVE, 1), else_=0)),
+                0,
+            ).label("leave_count"),
+            func.coalesce(
                 func.sum(case((AttendanceEntry.status == AttendanceStatus.PENDING, 1), else_=0)),
                 0,
             ).label("pending_count"),
+            coalesced_sum(AttendanceEntry.hours_logged).label("total_hours_logged"),
             coalesced_sum(AttendanceEntry.regular_hours).label("total_regular_hours"),
             coalesced_sum(AttendanceEntry.overtime_hours).label("total_overtime_hours"),
             coalesced_sum(AttendanceEntry.gross_earned).label("total_gross_earned"),
@@ -166,7 +171,9 @@ def build_attendance_summary(
         present_count=integer_count(data["present_count"]),
         late_count=integer_count(data["late_count"]),
         absent_count=integer_count(data["absent_count"]),
+        leave_count=integer_count(data["leave_count"]),
         pending_count=integer_count(data["pending_count"]),
+        total_hours_logged=decimal_money(data["total_hours_logged"]),
         total_regular_hours=decimal_money(data["total_regular_hours"]),
         total_overtime_hours=decimal_money(data["total_overtime_hours"]),
         total_gross_earned=decimal_money(data["total_gross_earned"]),
@@ -200,6 +207,12 @@ def build_monthly_attendance_rows(
                 func.sum(case((AttendanceEntry.status == AttendanceStatus.ABSENT, 1), else_=0)),
                 0,
             ).label("absent_count"),
+            func.coalesce(
+                func.sum(case((AttendanceEntry.status == AttendanceStatus.LEAVE, 1), else_=0)),
+                0,
+            ).label("leave_count"),
+            coalesced_sum(AttendanceEntry.hours_logged).label("total_hours_logged"),
+            coalesced_sum(AttendanceEntry.overtime_hours).label("total_overtime_hours"),
         )
         .outerjoin(
             AttendanceEntry,
@@ -226,6 +239,10 @@ def build_monthly_attendance_rows(
             "late_count": integer_count(row.late_count),
             "absent": integer_count(row.absent_count),
             "absent_count": integer_count(row.absent_count),
+            "leave": integer_count(row.leave_count),
+            "leave_count": integer_count(row.leave_count),
+            "total_hours_logged": decimal_money(row.total_hours_logged),
+            "total_overtime_hours": decimal_money(row.total_overtime_hours),
         }
         for row in rows
     ]
@@ -249,6 +266,8 @@ def read_daily_attendance_summary(
     active_employee_count = db.scalar(
         select(func.count(Employee.id)).where(Employee.is_active.is_(True))
     ) or 0
+    missing_entry_count = max(integer_count(active_employee_count) - summary.total_entries, 0)
+    pending_count = summary.pending_count + missing_entry_count
 
     return {
         "date": attendance_date.isoformat(),
@@ -261,8 +280,13 @@ def read_daily_attendance_summary(
         "late": summary.late_count,
         "absent_count": summary.absent_count,
         "absent": summary.absent_count,
-        "pending_count": summary.pending_count,
-        "pending": summary.pending_count,
+        "leave_count": summary.leave_count,
+        "leave": summary.leave_count,
+        "pending_count": pending_count,
+        "pending": pending_count,
+        "total_hours_logged": summary.total_hours_logged,
+        "total_regular_hours": summary.total_regular_hours,
+        "total_overtime_hours": summary.total_overtime_hours,
     }
 
 

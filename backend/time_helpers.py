@@ -28,6 +28,7 @@ class TimeRules:
 @dataclass(frozen=True)
 class AttendanceCalculation:
     status: AttendanceStatus
+    hours_logged: Decimal
     regular_hours: Decimal
     overtime_hours: Decimal
     late_minutes: int
@@ -94,9 +95,10 @@ def calculate_attendance(
 ) -> AttendanceCalculation:
     advance = money(advance_amount)
 
-    if requested_status == AttendanceStatus.ABSENT:
+    if requested_status in {AttendanceStatus.ABSENT, AttendanceStatus.LEAVE}:
         return AttendanceCalculation(
-            status=AttendanceStatus.ABSENT,
+            status=requested_status,
+            hours_logged=Decimal("0.00"),
             regular_hours=Decimal("0.00"),
             overtime_hours=Decimal("0.00"),
             late_minutes=0,
@@ -108,6 +110,7 @@ def calculate_attendance(
     if time_in is None or time_out is None:
         return AttendanceCalculation(
             status=AttendanceStatus.PENDING,
+            hours_logged=Decimal("0.00"),
             regular_hours=Decimal("0.00"),
             overtime_hours=Decimal("0.00"),
             late_minutes=0,
@@ -134,11 +137,10 @@ def calculate_attendance(
     attendance_status = AttendanceStatus.LATE if late_minutes else AttendanceStatus.PRESENT
 
     regular_target_seconds = standard_work_seconds(rules.standard_work_hours)
-    early_leave_seconds = max(0, shift_end_seconds - time_out_seconds)
     worked_seconds = time_out_seconds - time_in_seconds
-    regular_seconds = max(0, regular_target_seconds - late_seconds - early_leave_seconds)
-    regular_seconds = min(regular_seconds, worked_seconds, regular_target_seconds)
-    overtime_seconds = max(0, time_out_seconds - shift_end_seconds)
+    regular_seconds = min(worked_seconds, regular_target_seconds)
+    overtime_seconds = max(0, worked_seconds - regular_target_seconds)
+    hours_logged = hours_from_seconds(worked_seconds)
     regular_hours = hours_from_seconds(regular_seconds)
     overtime_hours = hours_from_seconds(overtime_seconds)
 
@@ -149,6 +151,7 @@ def calculate_attendance(
 
     return AttendanceCalculation(
         status=attendance_status,
+        hours_logged=hours_logged,
         regular_hours=regular_hours,
         overtime_hours=overtime_hours,
         late_minutes=late_minutes,

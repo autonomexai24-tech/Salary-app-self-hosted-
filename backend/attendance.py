@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 try:
     from .database import get_db
-    from .models import AttendanceEntry, CompanySettings, Employee, PayrollLedger, User, utc_now
+    from .models import AttendanceEntry, AttendanceStatus, CompanySettings, Employee, PayrollLedger, User, utc_now
     from .schemas import (
         AttendanceEmployeeRead,
         AttendanceEntryList,
@@ -26,7 +26,7 @@ try:
     from .utils.payroll_locks import lock_payroll_month
 except ImportError:
     from database import get_db
-    from models import AttendanceEntry, CompanySettings, Employee, PayrollLedger, User, utc_now
+    from models import AttendanceEntry, AttendanceStatus, CompanySettings, Employee, PayrollLedger, User, utc_now
     from schemas import (
         AttendanceEmployeeRead,
         AttendanceEntryList,
@@ -116,6 +116,7 @@ def apply_attendance_payload(
     entry.time_in = payload.time_in
     entry.time_out = payload.time_out
     entry.status = calculation.status
+    entry.hours_logged = calculation.hours_logged
     entry.regular_hours = calculation.regular_hours
     entry.overtime_hours = calculation.overtime_hours
     entry.late_minutes = calculation.late_minutes
@@ -140,6 +141,7 @@ def attendance_entry_response(
         time_in=entry.time_in,
         time_out=entry.time_out,
         status=entry.status,
+        hours_logged=entry.hours_logged,
         regular_hours=entry.regular_hours,
         overtime_hours=entry.overtime_hours,
         late_minutes=entry.late_minutes,
@@ -164,6 +166,7 @@ def list_attendance_entries(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
     employee_id: uuid.UUID | None = None,
+    status: AttendanceStatus | None = None,
 ) -> AttendanceEntryList:
     statement = (
         select(AttendanceEntry)
@@ -173,6 +176,8 @@ def list_attendance_entries(
     )
     if employee_id is not None:
         statement = statement.where(AttendanceEntry.employee_id == employee_id)
+    if status is not None:
+        statement = statement.where(AttendanceEntry.status == status)
 
     entries = list(db.scalars(statement).all())
     return AttendanceEntryList(

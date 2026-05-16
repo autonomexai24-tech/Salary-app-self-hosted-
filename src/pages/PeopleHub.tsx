@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,9 +9,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Search, UserPlus, Zap, Phone, User, Save } from "lucide-react";
-import { COMPANY_FIXED_SHIFT } from "@/lib/payroll-config";
 import CompanySettings from "@/components/CompanySettings";
-import { apiErrorMessage, createEmployee, listEmployees, mapEmployeeToUi, type Employee } from "@/lib/api";
+import {
+  apiErrorMessage,
+  createEmployee,
+  listDepartments,
+  listDesignations,
+  listEmployees,
+  mapEmployeeToUi,
+  previewEmployeeRates,
+  type Employee,
+} from "@/lib/api";
 import { toast } from "sonner";
 
 export default function PeopleHub() {
@@ -31,21 +39,40 @@ export default function PeopleHub() {
   const [regMonthly, setRegMonthly] = useState("");
   const [regWorkingDays, setRegWorkingDays] = useState("26");
   const [isSavingEmployee, setIsSavingEmployee] = useState(false);
+  const [ratePreview, setRatePreview] = useState({ dailyRate: 0, hourlyRate: 0, minuteRate: 0 });
+
+  const loadEmployees = useCallback((query?: string) => {
+    return listEmployees(query).then((records) => {
+      const nextEmployees = records.map(mapEmployeeToUi);
+      setEmployees(nextEmployees);
+      setDepartments((prev) => Array.from(new Set([...prev, ...nextEmployees.map((employee) => employee.department)])));
+      setDesignations((prev) => Array.from(new Set([...prev, ...nextEmployees.map((employee) => employee.designation)])));
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
-    listEmployees()
+    listDepartments()
       .then((records) => {
         if (cancelled) return;
-        const nextEmployees = records.map(mapEmployeeToUi);
-        setEmployees(nextEmployees);
-        setDepartments((prev) => Array.from(new Set([...prev, ...nextEmployees.map((employee) => employee.department)])));
-        setDesignations((prev) => Array.from(new Set([...prev, ...nextEmployees.map((employee) => employee.designation)])));
+        setDepartments((prev) => Array.from(new Set([...prev, ...records.map((record) => record.name)])));
       })
       .catch((error) => {
         if (cancelled) return;
-        toast.error("Could not load employees", {
+        toast.error("Could not load departments", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    listDesignations()
+      .then((records) => {
+        if (cancelled) return;
+        setDesignations((prev) => Array.from(new Set([...prev, ...records.map((record) => record.name)])));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load designations", {
           description: apiErrorMessage(error),
         });
       });
@@ -54,6 +81,24 @@ export default function PeopleHub() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      loadEmployees(search)
+        .catch((error) => {
+          if (cancelled) return;
+          toast.error("Could not load employees", {
+            description: apiErrorMessage(error),
+          });
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [loadEmployees, search]);
 
   const filteredEmployees = useMemo(() => {
     if (!search.trim()) return employees;
@@ -66,13 +111,42 @@ export default function PeopleHub() {
     );
   }, [employees, search]);
 
-  // Auto-calc rates
   const monthlyVal = Number(regMonthly) || 0;
   const workingDaysVal = Number(regWorkingDays) || 26;
-  const hoursVal = COMPANY_FIXED_SHIFT.totalHours;
-  const perDay = monthlyVal > 0 ? Math.round(monthlyVal / workingDaysVal) : 0;
-  const perHour = perDay > 0 ? Math.round(perDay / hoursVal) : 0;
-  const perMinute = perHour > 0 ? Math.round((perHour / 60) * 100) / 100 : 0;
+  const perDay = ratePreview.dailyRate;
+  const perHour = ratePreview.hourlyRate;
+  const perMinute = ratePreview.minuteRate;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (monthlyVal <= 0 || workingDaysVal <= 0) {
+      setRatePreview({ dailyRate: 0, hourlyRate: 0, minuteRate: 0 });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    previewEmployeeRates({
+      monthlyBasic: monthlyVal,
+      workingDaysPerMonth: workingDaysVal,
+    })
+      .then((rates) => {
+        if (cancelled) return;
+        setRatePreview({
+          dailyRate: Number(rates.daily_rate) || 0,
+          hourlyRate: Number(rates.hourly_rate) || 0,
+          minuteRate: Number(rates.minute_rate) || 0,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRatePreview({ dailyRate: 0, hourlyRate: 0, minuteRate: 0 });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [monthlyVal, workingDaysVal]);
 
   const resetForm = () => {
     setRegName("");
@@ -89,9 +163,11 @@ export default function PeopleHub() {
     try {
       const created = await createEmployee({
         fullName: regName.trim(),
+        phoneNumber: regPhone.trim(),
         department: regDept,
         designation: regDesig,
         monthlyBasic: monthlyVal,
+        workingDaysPerMonth: workingDaysVal,
       });
       setEmployees((prev) => [...prev, mapEmployeeToUi(created)]);
       resetForm();

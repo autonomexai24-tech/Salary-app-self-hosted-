@@ -9,7 +9,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CalendarDays, ChevronDown, Clock, Users, UserCheck, UserX, BarChart3, Save, Download } from "lucide-react";
 import { toast } from "sonner";
-import { calculateShiftDetails, getStatusFromEntry } from "@/lib/payroll-utils";
 import { COMPANY_FIXED_SHIFT } from "@/lib/payroll-config";
 import { cn } from "@/lib/utils";
 import {
@@ -30,6 +29,7 @@ import {
   type BackendMonthlyAttendanceRow,
 } from "@/lib/api";
 type FilterStatus = "all" | "present" | "late" | "pending";
+type AttendanceDisplayStatus = "present" | "late" | "pending";
 
 interface MonthlyReportRow {
   name: string;
@@ -60,9 +60,15 @@ function monthlyAttendanceRows(rows: BackendMonthlyAttendanceRow[] = []): Monthl
     department: row.department ?? "",
     workingDays: numberFromSummary(row.working_days),
     present: numberFromSummary(row.present ?? row.present_count),
-    absent: numberFromSummary(row.absent ?? row.absent_count),
+    absent: numberFromSummary(row.absent ?? row.absent_count) + numberFromSummary(row.leave ?? row.leave_count),
     late: numberFromSummary(row.late ?? row.late_count),
   }));
+}
+
+function displayStatusFromBackend(status?: AttendanceEntry["status"]): AttendanceDisplayStatus {
+  if (status === "present") return "present";
+  if (status === "late") return "late";
+  return "pending";
 }
 
 function reportMonthToMonthYear(value: string): string {
@@ -169,14 +175,29 @@ export default function DailyLog() {
   const updateAttendance = (empId: string, field: keyof AttendanceEntry, value: string | number) => {
     setAttendance((prev) => ({
       ...prev,
-      [empId]: { ...(prev[empId] ?? emptyAttendanceEntry(empId)), [field]: value },
+      [empId]: {
+        ...(prev[empId] ?? emptyAttendanceEntry(empId)),
+        [field]: value,
+        status: "pending",
+        hoursLogged: 0,
+        overtimeHours: 0,
+        lateMinutes: 0,
+      },
     }));
   };
 
   const quickFill = (empId: string) => {
     setAttendance((prev) => ({
       ...prev,
-      [empId]: { ...(prev[empId] ?? emptyAttendanceEntry(empId)), timeIn: COMPANY_FIXED_SHIFT.start, timeOut: COMPANY_FIXED_SHIFT.end },
+      [empId]: {
+        ...(prev[empId] ?? emptyAttendanceEntry(empId)),
+        timeIn: COMPANY_FIXED_SHIFT.start,
+        timeOut: COMPANY_FIXED_SHIFT.end,
+        status: "pending",
+        hoursLogged: 0,
+        overtimeHours: 0,
+        lateMinutes: 0,
+      },
     }));
   };
 
@@ -204,10 +225,10 @@ export default function DailyLog() {
   }, [attendance, employees, todayIso]);
 
   const employeeStatuses = useMemo(() => {
-    const map: Record<string, "present" | "late" | "pending"> = {};
+    const map: Record<string, AttendanceDisplayStatus> = {};
     employees.forEach((emp) => {
       const entry = attendance[emp.id];
-      map[emp.id] = entry ? getStatusFromEntry(entry.timeIn, entry.timeOut) : "pending";
+      map[emp.id] = displayStatusFromBackend(entry?.status);
     });
     return map;
   }, [attendance, employees]);
@@ -227,9 +248,10 @@ export default function DailyLog() {
     const present = countFromSummary(dailySummary, ["present_count", "present"]);
     const late = countFromSummary(dailySummary, ["late_count", "late"]);
     const absent = countFromSummary(dailySummary, ["absent_count", "absent"]);
+    const leave = countFromSummary(dailySummary, ["leave_count", "leave"]);
     const pending = countFromSummary(dailySummary, ["pending_count", "pending"]);
     const all = countFromSummary(dailySummary, ["total_employees", "total_workforce", "total_entries"]) || employees.length;
-    return { present, late, pending: absent + pending, all };
+    return { present, late, pending: absent + leave + pending, all };
   }, [dailySummary, derivedCounts, employees.length]);
 
   const filteredEmployees = useMemo(() => {
@@ -288,7 +310,7 @@ export default function DailyLog() {
         {filteredEmployees.map((emp) => {
           const entry = attendance[emp.id] ?? emptyAttendanceEntry(emp.id);
           const status = employeeStatuses[emp.id];
-          const shift = calculateShiftDetails(entry.timeIn, entry.timeOut);
+          const shift = { hoursWorked: entry.hoursLogged, otHours: entry.overtimeHours };
           const isOpen = openCards[emp.id] ?? false;
 
           return (

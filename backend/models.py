@@ -41,6 +41,7 @@ class AttendanceStatus(str, enum.Enum):
     PENDING = "pending"
     PRESENT = "present"
     ABSENT = "absent"
+    LEAVE = "leave"
     LATE = "late"
 
 
@@ -106,6 +107,8 @@ class CompanySettings(Base):
     __table_args__ = (
         CheckConstraint("id = 1", name="company_settings_singleton_id"),
         CheckConstraint("length(company_name) > 0", name="company_settings_name_required"),
+        CheckConstraint("length(timezone) > 0", name="company_settings_timezone_required"),
+        CheckConstraint("length(currency) = 3", name="company_settings_currency_code"),
         CheckConstraint(
             "shift_end_time > shift_start_time",
             name="company_settings_shift_times_valid",
@@ -122,6 +125,30 @@ class CompanySettings(Base):
             "overtime_multiplier >= 0",
             name="company_settings_overtime_multiplier_non_negative",
         ),
+        CheckConstraint(
+            "working_days_per_month > 0",
+            name="company_settings_working_days_per_month_positive",
+        ),
+        CheckConstraint(
+            "payroll_day >= 1 AND payroll_day <= 31",
+            name="company_settings_payroll_day_valid",
+        ),
+        CheckConstraint(
+            "annual_paid_leaves >= 0",
+            name="company_settings_annual_paid_leaves_non_negative",
+        ),
+        CheckConstraint(
+            "monthly_leave_accrual >= 0",
+            name="company_settings_monthly_leave_accrual_non_negative",
+        ),
+        CheckConstraint(
+            "default_leave_balance >= 0",
+            name="company_settings_default_leave_balance_non_negative",
+        ),
+        CheckConstraint(
+            "late_penalty_per_minute >= 0",
+            name="company_settings_late_penalty_per_minute_non_negative",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -130,6 +157,8 @@ class CompanySettings(Base):
     phone: Mapped[str | None] = mapped_column(String(40))
     email: Mapped[str | None] = mapped_column(String(254))
     tax_id: Mapped[str | None] = mapped_column(String(64))
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata", nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
     shift_start_time: Mapped[time] = mapped_column(
         Time(timezone=False),
         default=time(9, 0),
@@ -151,9 +180,130 @@ class CompanySettings(Base):
         default=Decimal("1.00"),
         nullable=False,
     )
+    working_days_per_month: Mapped[Decimal] = mapped_column(
+        Numeric(precision=5, scale=2),
+        default=Decimal("30.00"),
+        nullable=False,
+    )
+    payroll_cycle: Mapped[str] = mapped_column(String(20), default="monthly", nullable=False)
+    payroll_day: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    annual_paid_leaves: Mapped[Decimal] = mapped_column(
+        Numeric(precision=5, scale=2),
+        default=Decimal("12.00"),
+        nullable=False,
+    )
+    monthly_leave_accrual: Mapped[Decimal] = mapped_column(
+        Numeric(precision=5, scale=2),
+        default=Decimal("1.00"),
+        nullable=False,
+    )
+    unused_leave_action: Mapped[str] = mapped_column(
+        String(32),
+        default="carry_forward",
+        nullable=False,
+    )
+    default_leave_balance: Mapped[Decimal] = mapped_column(
+        Numeric(precision=5, scale=2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
+    late_penalty_per_minute: Mapped[Decimal] = mapped_column(
+        Numeric(precision=10, scale=2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
     logo_path: Mapped[str | None] = mapped_column(String(255))
     logo_content_type: Mapped[str | None] = mapped_column(String(80))
     logo_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+
+class Department(Base):
+    __tablename__ = "departments"
+    __table_args__ = (
+        UniqueConstraint("normalized_name", name="uq_departments_normalized_name"),
+        CheckConstraint("length(name) > 0", name="departments_name_required"),
+        CheckConstraint("length(normalized_name) > 0", name="departments_normalized_name_required"),
+        Index("ix_departments_active_name", "is_active", "name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+
+class Designation(Base):
+    __tablename__ = "designations"
+    __table_args__ = (
+        UniqueConstraint("normalized_name", name="uq_designations_normalized_name"),
+        CheckConstraint("length(name) > 0", name="designations_name_required"),
+        CheckConstraint("length(normalized_name) > 0", name="designations_normalized_name_required"),
+        Index("ix_designations_active_name", "is_active", "name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+
+class CompanyHoliday(Base):
+    __tablename__ = "company_holidays"
+    __table_args__ = (
+        UniqueConstraint("holiday_date", name="uq_company_holidays_date"),
+        CheckConstraint("length(name) > 0", name="company_holidays_name_required"),
+        Index("ix_company_holidays_active_date", "is_active", "holiday_date"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    holiday_date: Mapped[date] = mapped_column(Date, nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
@@ -172,7 +322,17 @@ class Employee(Base):
     __table_args__ = (
         CheckConstraint("daily_rate >= 0", name="employees_daily_rate_non_negative"),
         CheckConstraint("hourly_rate >= 0", name="employees_hourly_rate_non_negative"),
+        CheckConstraint("minute_rate >= 0", name="employees_minute_rate_non_negative"),
         CheckConstraint("monthly_basic >= 0", name="employees_monthly_basic_non_negative"),
+        CheckConstraint(
+            "working_days_per_month > 0",
+            name="employees_working_days_per_month_positive",
+        ),
+        CheckConstraint(
+            "working_hours_per_day > 0",
+            name="employees_working_hours_per_day_positive",
+        ),
+        CheckConstraint("leave_balance >= 0", name="employees_leave_balance_non_negative"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -182,10 +342,28 @@ class Employee(Base):
     )
     employee_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(160), index=True)
+    phone_number: Mapped[str | None] = mapped_column(String(40))
     department: Mapped[str] = mapped_column(String(100), index=True)
     designation: Mapped[str] = mapped_column(String(120))
+    joining_date: Mapped[date] = mapped_column(Date, default=date.today, nullable=False)
+    working_days_per_month: Mapped[Decimal] = mapped_column(
+        Numeric(precision=5, scale=2),
+        default=Decimal("30.00"),
+        nullable=False,
+    )
+    working_hours_per_day: Mapped[Decimal] = mapped_column(
+        Numeric(precision=7, scale=2),
+        default=Decimal("8.00"),
+        nullable=False,
+    )
+    leave_balance: Mapped[Decimal] = mapped_column(
+        Numeric(precision=5, scale=2),
+        default=Decimal("0.00"),
+        nullable=False,
+    )
     daily_rate: Mapped[Decimal] = mapped_column(Money, nullable=False)
     hourly_rate: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    minute_rate: Mapped[Decimal] = mapped_column(Money, nullable=False)
     monthly_basic: Mapped[Decimal] = mapped_column(Money, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -213,6 +391,7 @@ class AttendanceEntry(Base):
     __tablename__ = "attendance_entries"
     __table_args__ = (
         UniqueConstraint("employee_id", "work_date", name="uq_attendance_employee_work_date"),
+        CheckConstraint("hours_logged >= 0", name="attendance_hours_logged_non_negative"),
         CheckConstraint("regular_hours >= 0", name="attendance_regular_hours_non_negative"),
         CheckConstraint("overtime_hours >= 0", name="attendance_overtime_hours_non_negative"),
         CheckConstraint("late_minutes >= 0", name="attendance_late_minutes_non_negative"),
@@ -246,6 +425,7 @@ class AttendanceEntry(Base):
         index=True,
     )
     regular_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
+    hours_logged: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
     overtime_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
     late_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     penalty_amount: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
