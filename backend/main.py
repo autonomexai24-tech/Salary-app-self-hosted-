@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,12 +10,13 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 try:
     from .attendance import router as attendance_router
     from .company_settings import router as company_settings_router
     from .dashboard import router as dashboard_router
-    from .database import get_db, get_settings
+    from .database import UploadStorageError, get_db, get_settings, validate_upload_storage
     from .employees import router as employees_router
     from .payroll import receipts_router, router as payroll_router
     from .users import auth_router, router as users_router
@@ -21,14 +24,15 @@ except ImportError:
     from attendance import router as attendance_router
     from company_settings import router as company_settings_router
     from dashboard import router as dashboard_router
-    from database import get_db, get_settings
+    from database import UploadStorageError, get_db, get_settings, validate_upload_storage
     from employees import router as employees_router
     from payroll import receipts_router, router as payroll_router
     from users import auth_router, router as users_router
 
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
-settings.upload_dir.mkdir(parents=True, exist_ok=True)
+upload_dir = validate_upload_storage(settings)
 API_PREFIX = "/api"
 
 app = FastAPI(
@@ -49,9 +53,9 @@ app.add_middleware(
 
 
 app.mount(
-    settings.normalized_upload_url_path,
-    StaticFiles(directory=settings.upload_dir),
-    name="uploads",
+    settings.public_logo_url_path,
+    StaticFiles(directory=upload_dir / "logos"),
+    name="upload_logos",
 )
 app.include_router(auth_router, prefix=API_PREFIX)
 app.include_router(users_router, prefix=API_PREFIX)
@@ -61,6 +65,24 @@ app.include_router(attendance_router, prefix=API_PREFIX)
 app.include_router(payroll_router, prefix=API_PREFIX)
 app.include_router(receipts_router, prefix=API_PREFIX)
 app.include_router(dashboard_router, prefix=API_PREFIX)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(
+    _request: Request,
+    exc: StarletteHTTPException,
+) -> JSONResponse:
+    detail = exc.detail
+    if not isinstance(detail, dict):
+        detail = {
+            "code": "http_error",
+            "message": str(detail),
+        }
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail},
+        headers=getattr(exc, "headers", None),
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -88,6 +110,41 @@ async def validation_exception_handler(
     )
 
 
+@app.exception_handler(SQLAlchemyError)
+async def database_exception_handler(
+    _request: Request,
+    exc: SQLAlchemyError,
+) -> JSONResponse:
+    logger.exception("Database operation failed", exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "detail": {
+                "code": "database_unavailable",
+                "message": "The database is temporarily unavailable",
+            }
+        },
+    )
+
+
+@app.exception_handler(OSError)
+@app.exception_handler(UploadStorageError)
+async def filesystem_exception_handler(
+    _request: Request,
+    exc: OSError | UploadStorageError,
+) -> JSONResponse:
+    logger.exception("Filesystem operation failed", exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "detail": {
+                "code": "filesystem_error",
+                "message": "The server could not access persistent storage",
+            }
+        },
+    )
+
+
 @app.get("/", tags=["system"])
 def root() -> dict[str, str]:
     return {
@@ -102,14 +159,27 @@ def root() -> dict[str, str]:
 def health_check(db: Session = Depends(get_db)) -> dict[str, str]:
     try:
         db.execute(text("SELECT 1"))
+        validate_upload_storage(settings)
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database health check failed",
+            detail={
+                "code": "database_unavailable",
+                "message": "Database health check failed",
+            },
+        ) from exc
+    except UploadStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "upload_storage_unavailable",
+                "message": "Upload storage health check failed",
+            },
         ) from exc
 
     return {
         "service": settings.app_name,
         "status": "healthy",
         "database": "reachable",
+        "uploads": "writable",
     }

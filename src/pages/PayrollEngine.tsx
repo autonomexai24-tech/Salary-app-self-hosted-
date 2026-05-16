@@ -37,6 +37,9 @@ import {
   type BackendMonthlyPayrollSummary,
   type BackendEmployee,
   type BackendPayrollLine,
+  type BackendPayrollPreview,
+  type BackendPayrollLedger,
+  type PayrollOverridePayload,
 } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -52,24 +55,35 @@ interface PayrollRow {
   hourlyRate: number;
   paidLeaves: number;
   advancesTaken: number;
-  backendGrossPay?: number;
-  backendTotalPenalties?: number;
-  backendNetPay?: number;
-  backendOvertimeHours?: number;
+  overtimeHours: number;
+  shortfallHours: number;
+  baseEarned: number;
+  overtimePay: number;
+  bonusAmount: number;
+  otherFines: number;
+  grossEarned: number;
+  lateDeductions: number;
+  shortfallDeductions: number;
+  totalPenalties: number;
+  totalDeductions: number;
+  netPayable: number;
 }
 
-/**
- * Pure function: Net Payable calculation
- * Formula: (Base Salary) + (OT Hours × OT Rate) - (Shortfall Hours × Shortfall Rate) - (Advances) + (Bonuses) - (Fines)
- */
-function getCalcs(row: PayrollRow, bonus = 0, fines = 0) {
-  const otHours = row.backendOvertimeHours ?? Math.max(0, row.hoursLogged - row.standardHours);
-  const shortHours = Math.max(0, row.standardHours - row.hoursLogged - row.paidLeaves * 8);
-  const otPay = Math.round(otHours * row.hourlyRate);
-  const shortDeduction = row.backendTotalPenalties ?? Math.round(shortHours * row.hourlyRate);
-  const grossEarned = row.backendGrossPay ?? row.baseSalary + otPay;
-  const totalDeductions = shortDeduction + row.advancesTaken + fines;
-  const netPayable = (row.backendNetPay ?? grossEarned - shortDeduction - row.advancesTaken) + bonus - fines;
+interface PayrollTotals {
+  totalBase: number;
+  totalOT: number;
+  totalDeductions: number;
+  totalNet: number;
+}
+
+function payrollDisplay(row: PayrollRow) {
+  const otHours = row.overtimeHours;
+  const shortHours = row.shortfallHours;
+  const otPay = row.overtimePay;
+  const shortDeduction = row.totalPenalties;
+  const grossEarned = row.grossEarned;
+  const totalDeductions = row.totalDeductions;
+  const netPayable = row.netPayable;
   return { otHours, shortHours, otPay, shortDeduction, grossEarned, totalDeductions, netPayable };
 }
 
@@ -80,10 +94,11 @@ function numberFromApi(value: string | number | null | undefined): number {
 
 function mapPayrollLineToRow(line: BackendPayrollLine, employees: BackendEmployee[]): PayrollRow {
   const employee = employees.find((record) => record.id === line.employee_id);
-  const regularHours = numberFromApi(line.regular_hours);
   const overtimeHours = numberFromApi(line.overtime_hours);
+  const hoursLogged = numberFromApi(line.hours_logged);
+  const expectedHours = numberFromApi(line.expected_hours);
   const monthlyBasic = numberFromApi(employee?.monthly_basic);
-  const hourlyRate = numberFromApi(employee?.hourly_rate) || (monthlyBasic > 0 ? monthlyBasic / 208 : 0);
+  const hourlyRate = numberFromApi(employee?.hourly_rate);
 
   return {
     employeeId: line.employee_id,
@@ -91,17 +106,39 @@ function mapPayrollLineToRow(line: BackendPayrollLine, employees: BackendEmploye
     avatar: initialsFromName(line.employee_name),
     role: line.designation,
     department: line.department,
-    baseSalary: monthlyBasic || numberFromApi(line.gross_pay),
-    standardHours: 208,
-    hoursLogged: Math.round((regularHours + overtimeHours) * 100) / 100,
+    baseSalary: monthlyBasic,
+    standardHours: expectedHours,
+    hoursLogged,
     hourlyRate,
-    paidLeaves: 0,
+    paidLeaves: line.leave_days ?? 0,
     advancesTaken: numberFromApi(line.total_advances),
-    backendGrossPay: numberFromApi(line.gross_pay),
-    backendTotalPenalties: numberFromApi(line.total_penalties),
-    backendNetPay: numberFromApi(line.net_pay),
-    backendOvertimeHours: overtimeHours,
+    overtimeHours,
+    shortfallHours: numberFromApi(line.shortfall_hours),
+    baseEarned: numberFromApi(line.base_earned),
+    overtimePay: numberFromApi(line.overtime_pay),
+    bonusAmount: numberFromApi(line.bonus),
+    otherFines: numberFromApi(line.other_fines),
+    grossEarned: numberFromApi(line.gross_pay),
+    lateDeductions: numberFromApi(line.late_deductions),
+    shortfallDeductions: numberFromApi(line.shortfall_deductions),
+    totalPenalties: numberFromApi(line.total_penalties),
+    totalDeductions: numberFromApi(line.total_deductions),
+    netPayable: numberFromApi(line.net_pay),
   };
+}
+
+function totalsFromPayrollResult(result: BackendPayrollPreview | BackendPayrollLedger): PayrollTotals {
+  return {
+    totalBase: numberFromApi(result.total_base ?? result.total_gross),
+    totalOT: numberFromApi(result.total_overtime),
+    totalDeductions: numberFromApi(result.total_deductions),
+    totalNet: numberFromApi(result.total_net),
+  };
+}
+
+function overrideNumber(value: string | undefined): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 // ---------- Component ----------
@@ -114,8 +151,23 @@ export default function PayrollEngine() {
   const [employeeRecords, setEmployeeRecords] = useState<BackendEmployee[]>([]);
   const [payrollRows, setPayrollRows] = useState<PayrollRow[]>([]);
   const [monthlyPayrollSummary, setMonthlyPayrollSummary] = useState<BackendMonthlyPayrollSummary | null>(null);
+  const [payrollTotals, setPayrollTotals] = useState<PayrollTotals>({ totalBase: 0, totalOT: 0, totalDeductions: 0, totalNet: 0 });
+  const [payrollOverrides, setPayrollOverrides] = useState<Record<string, { bonus: string; fines: string }>>({});
   const [isSavingPayroll, setIsSavingPayroll] = useState(false);
   const selectedMonthYear = useMemo(() => monthYearFromDate(selectedMonth), [selectedMonth]);
+  const payrollOverridePayload = useMemo<PayrollOverridePayload[]>(
+    () => Object.entries(payrollOverrides)
+      .map(([employeeId, values]) => ({
+        employee_id: employeeId,
+        bonus: overrideNumber(values.bonus),
+        other_fines: overrideNumber(values.fines),
+      }))
+      .filter((item) => item.bonus > 0 || item.other_fines > 0),
+    [payrollOverrides]
+  );
+  const activeReviewRow = reviewRow
+    ? payrollRows.find((row) => row.employeeId === reviewRow.employeeId) ?? reviewRow
+    : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -126,30 +178,28 @@ export default function PayrollEngine() {
         if (cancelled) return;
         setEmployeeRecords(employees);
 
-        readMonthlyPayrollSummary(selectedMonthYear)
-          .then((summary) => {
-            if (!cancelled) setMonthlyPayrollSummary(summary);
-          })
-          .catch(() => {
-            if (!cancelled) setMonthlyPayrollSummary(null);
-          });
-
-        const preview = await readPayrollPreview(selectedMonth);
-        if (cancelled) return;
-        if (preview.line_items.length > 0) {
-          setPayrollRows(preview.line_items.map((line) => mapPayrollLineToRow(line, employees)));
-          return;
-        }
-
         try {
-          const ledger = await readPayrollLedger(selectedMonthYear);
+          const [ledger, summary] = await Promise.all([
+            readPayrollLedger(selectedMonthYear),
+            readMonthlyPayrollSummary(selectedMonthYear),
+          ]);
           if (cancelled) return;
           setPayrollRows(ledger.items.map((line) => mapPayrollLineToRow(line, employees)));
+          setPayrollTotals(totalsFromPayrollResult(ledger));
+          setMonthlyPayrollSummary(summary);
+          return;
         } catch {
-          if (!cancelled) setPayrollRows([]);
+          if (!cancelled) setMonthlyPayrollSummary(null);
         }
+
+        const preview = await readPayrollPreview(selectedMonth, payrollOverridePayload);
+        if (cancelled) return;
+        setPayrollRows(preview.line_items.map((line) => mapPayrollLineToRow(line, employees)));
+        setPayrollTotals(totalsFromPayrollResult(preview));
       } catch (error) {
         if (cancelled) return;
+        setPayrollRows([]);
+        setPayrollTotals({ totalBase: 0, totalOT: 0, totalDeductions: 0, totalNet: 0 });
         toast.error("Could not load payroll data", {
           description: apiErrorMessage(error),
         });
@@ -161,47 +211,52 @@ export default function PayrollEngine() {
     return () => {
       cancelled = true;
     };
-  }, [selectedMonth, selectedMonthYear]);
+  }, [selectedMonth, selectedMonthYear, payrollOverridePayload]);
 
   const openReview = (row: PayrollRow) => {
+    const override = payrollOverrides[row.employeeId];
     setReviewRow(row);
-    setBonus("");
-    setFines("");
+    setBonus(override?.bonus ?? String(row.bonusAmount || ""));
+    setFines(override?.fines ?? String(row.otherFines || ""));
   };
 
   const pulse = useMemo(() => {
-    if (monthlyPayrollSummary) {
-      const totalDeductions = numberFromApi(monthlyPayrollSummary.total_deductions)
-        || numberFromApi(monthlyPayrollSummary.total_advances) + numberFromApi(monthlyPayrollSummary.total_penalties);
+    if (monthlyPayrollSummary && (monthlyPayrollSummary.locked_payroll_count ?? 0) > 0) {
       return {
         totalBase: numberFromApi(monthlyPayrollSummary.total_base ?? monthlyPayrollSummary.total_gross),
         totalOT: numberFromApi(monthlyPayrollSummary.total_overtime),
-        totalDeductions,
+        totalDeductions: numberFromApi(monthlyPayrollSummary.total_deductions),
         totalNet: numberFromApi(monthlyPayrollSummary.total_net),
       };
     }
 
-    let totalBase = 0, totalOT = 0, totalDeductions = 0, totalNet = 0;
-    for (const r of payrollRows) {
-      const c = getCalcs(r);
-      totalBase += r.baseSalary;
-      totalOT += c.otPay;
-      totalDeductions += c.shortDeduction + r.advancesTaken;
-      totalNet += c.netPayable;
-    }
-    return { totalBase, totalOT, totalDeductions, totalNet };
-  }, [monthlyPayrollSummary, payrollRows]);
+    return payrollTotals;
+  }, [monthlyPayrollSummary, payrollTotals]);
+
+  const updateReviewOverride = (field: "bonus" | "fines", value: string) => {
+    if (field === "bonus") setBonus(value);
+    else setFines(value);
+    if (!activeReviewRow) return;
+    setPayrollOverrides((prev) => ({
+      ...prev,
+      [activeReviewRow.employeeId]: {
+        bonus: field === "bonus" ? value : prev[activeReviewRow.employeeId]?.bonus ?? bonus,
+        fines: field === "fines" ? value : prev[activeReviewRow.employeeId]?.fines ?? fines,
+      },
+    }));
+  };
 
   const approvePayroll = async () => {
     setIsSavingPayroll(true);
     try {
-      const ledger = await lockPayrollLedger(selectedMonthYear);
+      const ledger = await lockPayrollLedger(selectedMonthYear, payrollOverridePayload);
       const [employees, summary] = await Promise.all([
         employeeRecords.length ? Promise.resolve(employeeRecords) : listEmployees(),
         readMonthlyPayrollSummary(selectedMonthYear),
       ]);
       setEmployeeRecords(employees);
       setPayrollRows(ledger.items.map((line) => mapPayrollLineToRow(line, employees)));
+      setPayrollTotals(totalsFromPayrollResult(ledger));
       setMonthlyPayrollSummary(summary);
       toast.success("Payroll ledger locked", {
         description: `${format(selectedMonth, "MMMM yyyy")} payslips are ready.`,
@@ -275,7 +330,7 @@ export default function PayrollEngine() {
             </TableHeader>
             <TableBody>
               {payrollRows.map((row) => {
-                const c = getCalcs(row);
+                const c = payrollDisplay(row);
                 const hoursOver = row.hoursLogged >= row.standardHours;
                 return (
                   <TableRow key={row.employeeId} className="group hover:bg-muted/30 transition-colors">
@@ -347,9 +402,20 @@ export default function PayrollEngine() {
       </Card>
 
       {/* Review Sheet */}
-      <Sheet open={!!reviewRow} onOpenChange={(open) => { if (!open) setReviewRow(null); }}>
+      <Sheet open={!!activeReviewRow} onOpenChange={(open) => { if (!open) setReviewRow(null); }}>
         <SheetContent className="sm:max-w-lg overflow-y-auto">
-          {reviewRow && <ReviewPanel row={reviewRow} month={selectedMonth} bonus={bonus} fines={fines} setBonus={setBonus} setFines={setFines} />}
+          {activeReviewRow && (
+            <ReviewPanel
+              row={activeReviewRow}
+              month={selectedMonth}
+              bonus={bonus}
+              fines={fines}
+              setBonus={(value) => updateReviewOverride("bonus", value)}
+              setFines={(value) => updateReviewOverride("fines", value)}
+              onApprove={approvePayroll}
+              isSaving={isSavingPayroll}
+            />
+          )}
         </SheetContent>
       </Sheet>
     </div>
@@ -357,12 +423,10 @@ export default function PayrollEngine() {
 }
 
 // ---------- Review Panel ----------
-function ReviewPanel({ row, month, bonus, fines, setBonus, setFines }: {
-  row: PayrollRow; month: Date; bonus: string; fines: string; setBonus: (v: string) => void; setFines: (v: string) => void;
+function ReviewPanel({ row, month, bonus, fines, setBonus, setFines, onApprove, isSaving }: {
+  row: PayrollRow; month: Date; bonus: string; fines: string; setBonus: (v: string) => void; setFines: (v: string) => void; onApprove: () => void; isSaving: boolean;
 }) {
-  const bonusVal = Number(bonus) || 0;
-  const finesVal = Number(fines) || 0;
-  const c = getCalcs(row, bonusVal, finesVal);
+  const c = payrollDisplay(row);
   const inr = (n: number) => n.toLocaleString("en-IN");
 
   return (
@@ -393,12 +457,12 @@ function ReviewPanel({ row, month, bonus, fines, setBonus, setFines }: {
           {/* Earnings */}
           <div className="space-y-2">
             <p className="text-xs font-medium text-emerald-600 uppercase tracking-wide">Earnings</p>
-            <BreakdownLine label={`Base Salary (for ${row.standardHours}h)`} value={`₹${inr(row.baseSalary)}`} tooltip={`Monthly base for ${row.standardHours} standard hours at ₹${inr(row.hourlyRate)}/hr`} />
+            <BreakdownLine label={`Base Salary (for ${row.standardHours}h)`} value={`₹${inr(row.baseEarned)}`} tooltip={`Backend-calculated base earned for ${row.standardHours} standard hours at ₹${inr(row.hourlyRate)}/hr`} />
             {c.otPay > 0 && (
               <BreakdownLine label={`Overtime Pay (${c.otHours}h × ₹${inr(row.hourlyRate)}/h)`} value={`+₹${inr(c.otPay)}`} variant="success" tooltip={`${c.otHours}h OT calculated at ₹${inr(row.hourlyRate)}/hr`} />
             )}
-            {bonusVal > 0 && (
-              <BreakdownLine label="Bonus" value={`+₹${inr(bonusVal)}`} variant="success" tooltip="Manually added bonus" />
+            {row.bonusAmount > 0 && (
+              <BreakdownLine label="Bonus" value={`+₹${inr(row.bonusAmount)}`} variant="success" tooltip="Backend-applied bonus" />
             )}
           </div>
 
@@ -411,7 +475,7 @@ function ReviewPanel({ row, month, bonus, fines, setBonus, setFines }: {
               label={`Short Hours / Late Penalties (${c.shortHours}h)`}
               value={c.shortDeduction > 0 ? `-₹${inr(c.shortDeduction)}` : "₹0"}
               variant={c.shortDeduction > 0 ? "destructive" : undefined}
-              tooltip={c.shortDeduction > 0 ? `${c.shortHours}h short at ₹${inr(row.hourlyRate)}/hr = ₹${inr(c.shortDeduction)} deducted` : "No shortfall this period"}
+              tooltip={c.shortDeduction > 0 ? "Backend-calculated penalties for this period" : "No shortfall this period"}
             />
             <BreakdownLine
               label="Advance Recovery"
@@ -419,8 +483,8 @@ function ReviewPanel({ row, month, bonus, fines, setBonus, setFines }: {
               variant={row.advancesTaken > 0 ? "warning" : undefined}
               tooltip={row.advancesTaken > 0 ? `Advance of ₹${inr(row.advancesTaken)} issued this month` : "No advances taken"}
             />
-            {finesVal > 0 && (
-              <BreakdownLine label="Other Fines" value={`-₹${inr(finesVal)}`} variant="destructive" tooltip="Manually added fine" />
+            {row.otherFines > 0 && (
+              <BreakdownLine label="Other Fines" value={`-₹${inr(row.otherFines)}`} variant="destructive" tooltip="Backend-applied fine" />
             )}
           </div>
 
@@ -437,17 +501,17 @@ function ReviewPanel({ row, month, bonus, fines, setBonus, setFines }: {
         <div className="rounded-xl border-2 border-primary/20 bg-primary/5 p-4">
           <p className="text-xs font-medium text-muted-foreground mb-3">Calculation Formula</p>
           <div className="flex items-center gap-1.5 flex-wrap text-sm">
-            <Badge variant="secondary" className="tabular-nums text-xs">Base: ₹{inr(row.baseSalary)}</Badge>
+            <Badge variant="secondary" className="tabular-nums text-xs">Base: ₹{inr(row.baseEarned)}</Badge>
             {c.otPay > 0 && (
               <>
                 <Plus className="h-3 w-3 text-muted-foreground" />
                 <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 tabular-nums text-xs">OT: ₹{inr(c.otPay)}</Badge>
               </>
             )}
-            {bonusVal > 0 && (
+            {row.bonusAmount > 0 && (
               <>
                 <Plus className="h-3 w-3 text-muted-foreground" />
-                <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 tabular-nums text-xs">Bonus: ₹{inr(bonusVal)}</Badge>
+                <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 tabular-nums text-xs">Bonus: ₹{inr(row.bonusAmount)}</Badge>
               </>
             )}
             <Minus className="h-3 w-3 text-muted-foreground" />
@@ -483,7 +547,7 @@ function ReviewPanel({ row, month, bonus, fines, setBonus, setFines }: {
           </div>
         </div>
 
-        <Button className="w-full bg-emerald-600 hover:bg-emerald-700 text-white">
+        <Button className="w-full bg-emerald-600 hover:bg-emerald-700 text-white" onClick={onApprove} disabled={isSaving}>
           <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
           Lock & Approve Salary
         </Button>

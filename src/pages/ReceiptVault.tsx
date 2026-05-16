@@ -46,10 +46,13 @@ interface ApprovedPayslip {
   advancesTaken: number;
   professionalTax: number;
   bonus: number;
-  backendGrossPay?: number;
-  backendTotalPenalties?: number;
-  backendNetPay?: number;
-  backendOvertimeHours?: number;
+  overtimeHours: number;
+  shortfallHours: number;
+  overtimePay: number;
+  grossEarnings: number;
+  shortPenalty: number;
+  totalDeductions: number;
+  net: number;
 }
 
 const EMPTY_PAYSLIP: ApprovedPayslip = {
@@ -67,17 +70,25 @@ const EMPTY_PAYSLIP: ApprovedPayslip = {
   advancesTaken: 0,
   professionalTax: 0,
   bonus: 0,
+  overtimeHours: 0,
+  shortfallHours: 0,
+  overtimePay: 0,
+  grossEarnings: 0,
+  shortPenalty: 0,
+  totalDeductions: 0,
+  net: 0,
 };
 
-function getCalcs(p: ApprovedPayslip) {
-  const otHours = p.backendOvertimeHours ?? Math.max(0, p.hoursLogged - p.standardHours);
-  const shortHours = Math.max(0, p.standardHours - p.hoursLogged - p.paidLeaves * 8);
-  const otPay = Math.round(otHours * p.hourlyRate * 100) / 100;
-  const shortPenalty = p.backendTotalPenalties ?? Math.round(shortHours * p.hourlyRate * 100) / 100;
-  const grossEarnings = p.backendGrossPay ?? p.baseSalary + otPay + p.bonus;
-  const totalDeductions = shortPenalty + p.advancesTaken + p.professionalTax;
-  const net = (p.backendNetPay ?? grossEarnings - shortPenalty - p.advancesTaken) + p.bonus - p.professionalTax;
-  return { otHours, shortHours, otPay, shortPenalty, grossEarnings, totalDeductions, net };
+function payrollDisplay(p: ApprovedPayslip) {
+  return {
+    otHours: p.overtimeHours,
+    shortHours: p.shortfallHours,
+    otPay: p.overtimePay,
+    shortPenalty: p.shortPenalty,
+    grossEarnings: p.grossEarnings,
+    totalDeductions: p.totalDeductions,
+    net: p.net,
+  };
 }
 
 function numberFromApi(value: string | number | null | undefined): number {
@@ -87,10 +98,11 @@ function numberFromApi(value: string | number | null | undefined): number {
 
 function mapLedgerLineToPayslip(line: BackendPayrollLine, employees: BackendEmployee[]): ApprovedPayslip {
   const employee = employees.find((record) => record.id === line.employee_id);
-  const regularHours = numberFromApi(line.regular_hours);
   const overtimeHours = numberFromApi(line.overtime_hours);
+  const hoursLogged = numberFromApi(line.hours_logged);
+  const expectedHours = numberFromApi(line.expected_hours);
   const monthlyBasic = numberFromApi(employee?.monthly_basic);
-  const hourlyRate = numberFromApi(employee?.hourly_rate) || (monthlyBasic > 0 ? monthlyBasic / 208 : 0);
+  const hourlyRate = numberFromApi(employee?.hourly_rate);
 
   return {
     employeeId: line.employee_id,
@@ -98,19 +110,22 @@ function mapLedgerLineToPayslip(line: BackendPayrollLine, employees: BackendEmpl
     avatar: initialsFromName(line.employee_name),
     department: line.department,
     designation: line.designation,
-    baseSalary: monthlyBasic || numberFromApi(line.gross_pay),
-    standardHours: 208,
-    hoursLogged: Math.round((regularHours + overtimeHours) * 100) / 100,
+    baseSalary: monthlyBasic,
+    standardHours: expectedHours,
+    hoursLogged,
     hourlyRate,
-    paidLeaves: 0,
-    leaveBalance: 0,
+    paidLeaves: line.leave_days ?? 0,
+    leaveBalance: numberFromApi(employee?.leave_balance),
     advancesTaken: numberFromApi(line.total_advances),
-    professionalTax: 0,
-    bonus: 0,
-    backendGrossPay: numberFromApi(line.gross_pay),
-    backendTotalPenalties: numberFromApi(line.total_penalties),
-    backendNetPay: numberFromApi(line.net_pay),
-    backendOvertimeHours: overtimeHours,
+    professionalTax: numberFromApi(line.other_fines),
+    bonus: numberFromApi(line.bonus),
+    overtimeHours,
+    shortfallHours: numberFromApi(line.shortfall_hours),
+    overtimePay: numberFromApi(line.overtime_pay),
+    grossEarnings: numberFromApi(line.gross_pay),
+    shortPenalty: numberFromApi(line.total_penalties),
+    totalDeductions: numberFromApi(line.total_deductions),
+    net: numberFromApi(line.net_pay),
   };
 }
 
@@ -181,7 +196,7 @@ export default function ReceiptVault() {
   }, [selectedMonthYear]);
 
   const selected = payslips.find((p) => p.employeeId === selectedId) ?? payslips[0] ?? EMPTY_PAYSLIP;
-  const c = getCalcs(selected);
+  const c = payrollDisplay(selected);
   const logoUrl = resolveApiAssetUrl(companySettings?.logo_url);
   const companyName = companySettings?.company_name ?? "";
   const companyAddress = companySettings?.address ?? "";
@@ -261,7 +276,7 @@ export default function ReceiptVault() {
             <ScrollArea className="h-[420px]">
               <div className="px-2 pb-2">
                 {payslips.map((p) => {
-                  const pCalc = getCalcs(p);
+                  const pCalc = payrollDisplay(p);
                   return (
                     <button
                       key={p.employeeId}

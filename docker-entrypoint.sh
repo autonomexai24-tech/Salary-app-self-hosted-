@@ -1,18 +1,9 @@
 #!/bin/sh
 set -eu
 
-attempt=1
-until python -m backend.init_db; do
-  if [ "$attempt" -ge 30 ]; then
-    echo "Database initialization failed after $attempt attempts"
-    exit 1
-  fi
-  echo "Database is not ready; retrying init_db ($attempt/30)"
-  attempt=$((attempt + 1))
-  sleep 2
-done
+python -m backend.startup
 
-uvicorn backend.main:app --host 127.0.0.1 --port 8000 &
+uvicorn backend.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips="127.0.0.1" &
 api_pid="$!"
 
 nginx -g "daemon off;" &
@@ -25,8 +16,16 @@ terminate() {
 
 trap terminate INT TERM
 
-while kill -0 "$api_pid" 2>/dev/null && kill -0 "$nginx_pid" 2>/dev/null; do
+while true; do
+  if ! kill -0 "$api_pid" 2>/dev/null; then
+    echo "FastAPI process exited unexpectedly"
+    terminate
+    exit 1
+  fi
+  if ! kill -0 "$nginx_pid" 2>/dev/null; then
+    echo "nginx process exited unexpectedly"
+    terminate
+    exit 1
+  fi
   sleep 2
 done
-
-terminate

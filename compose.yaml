@@ -21,12 +21,13 @@ services:
     environment:
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg2://payroll_user:payroll_password@postgres:5432/payroll_os
-      SECRET_KEY: dev-only-local-docker-secret-change-before-production
-      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
+      JWT_SECRET_KEY: dev-only-local-docker-secret-change-before-production
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
+      FRONTEND_URL: http://localhost:8080
       BOOTSTRAP_ADMIN_EMAIL: admin@example.com
       BOOTSTRAP_ADMIN_PASSWORD: Admin@2026!Local
       BOOTSTRAP_ADMIN_NAME: Admin User
-      UPLOAD_DIR: /app/backend/uploads
+      UPLOAD_PATH: /app/backend/uploads
       UPLOAD_URL_PATH: /uploads
     ports:
       - "8080:80"

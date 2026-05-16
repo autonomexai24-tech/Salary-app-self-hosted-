@@ -9,10 +9,10 @@ from decimal import Decimal
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:
-    from .models import AttendanceStatus, UserRole
+    from .models import AttendanceStatus, PayrollRunStatus, UserRole
     from .utils.payroll_helpers import parse_month_year
 except ImportError:
-    from models import AttendanceStatus, UserRole
+    from models import AttendanceStatus, PayrollRunStatus, UserRole
     from utils.payroll_helpers import parse_month_year
 
 
@@ -842,26 +842,69 @@ class PayrollPreviewLineRead(BaseModel):
     department: str
     designation: str
     days_present: int
+    expected_hours: Decimal
+    hours_logged: Decimal
     regular_hours: Decimal
     overtime_hours: Decimal
+    shortfall_hours: Decimal
+    leave_days: int
+    late_count: int
+    base_earned: Decimal
+    overtime_pay: Decimal
+    bonus: Decimal
     gross_pay: Decimal
     total_advances: Decimal
+    late_deductions: Decimal
+    shortfall_deductions: Decimal
+    other_fines: Decimal
     total_penalties: Decimal
+    total_deductions: Decimal
     net_pay: Decimal
 
 
 class PayrollPreviewRead(BaseModel):
     period_start: date_type
     period_end: date_type
+    status: PayrollRunStatus
     line_items: list[PayrollPreviewLineRead]
+    total_base: Decimal
+    total_overtime: Decimal
     total_gross: Decimal
     total_advances: Decimal
     total_penalties: Decimal
+    total_deductions: Decimal
     total_net: Decimal
 
 
+class PayrollOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    employee_id: uuid.UUID
+    bonus: Decimal = Field(
+        default=Decimal("0.00"),
+        ge=0,
+        max_digits=14,
+        decimal_places=2,
+    )
+    other_fines: Decimal = Field(
+        default=Decimal("0.00"),
+        ge=0,
+        max_digits=14,
+        decimal_places=2,
+    )
+
+
+class PayrollCalculationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    overrides: list[PayrollOverrideRequest] = Field(default_factory=list)
+
+
 class PayrollLedgerSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     month_year: str = Field(..., min_length=7, max_length=7)
+    overrides: list[PayrollOverrideRequest] = Field(default_factory=list)
 
     @field_validator("month_year")
     @classmethod
@@ -879,12 +922,33 @@ class PayrollLedgerLineRead(BaseModel):
     department: str
     designation: str
     days_present: int
+    expected_hours: Decimal
+    hours_logged: Decimal
     regular_hours: Decimal
     overtime_hours: Decimal
+    shortfall_hours: Decimal
+    leave_days: int
+    late_count: int
+    base_earned: Decimal
+    overtime_pay: Decimal
+    bonus: Decimal
     gross_pay: Decimal
     total_advances: Decimal
+    late_deductions: Decimal
+    shortfall_deductions: Decimal
+    other_fines: Decimal
     total_penalties: Decimal
+    total_deductions: Decimal
     net_pay: Decimal
+    status: PayrollRunStatus
+    is_locked: bool
+    locked_at: datetime | None = None
+    locked_by: uuid.UUID | None = None
+    finalized_at: datetime | None = None
+    payslip_pdf_path: str | None = None
+    payslip_generated_at: datetime | None = None
+    payslip_zip_path: str | None = None
+    payslip_zip_generated_at: datetime | None = None
     created_at: datetime
 
 
@@ -892,10 +956,18 @@ class PayrollLedgerRead(BaseModel):
     month_year: str
     period_start: date_type
     period_end: date_type
+    status: PayrollRunStatus
+    is_locked: bool
+    locked_at: datetime | None = None
+    locked_by: uuid.UUID | None = None
+    finalized_at: datetime | None = None
     items: list[PayrollLedgerLineRead]
+    total_base: Decimal
+    total_overtime: Decimal
     total_gross: Decimal
     total_advances: Decimal
     total_penalties: Decimal
+    total_deductions: Decimal
     total_net: Decimal
     saved_at: datetime | None = None
 
@@ -904,10 +976,17 @@ class MonthlyPayrollSummaryRead(BaseModel):
     month_year: str
     period_start: date_type
     period_end: date_type
+    status: PayrollRunStatus
+    is_locked: bool
+    locked_at: datetime | None = None
+    finalized_at: datetime | None = None
     locked_payroll_count: int
+    total_base: Decimal
+    total_overtime: Decimal
     total_gross: Decimal
     total_advances: Decimal
     total_penalties: Decimal
+    total_deductions: Decimal
     total_net: Decimal
     saved_at: datetime | None = None
 

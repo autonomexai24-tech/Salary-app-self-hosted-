@@ -31,6 +31,8 @@ def apply_schema_updates(connection) -> None:
 
     connection.execute(text("ALTER TYPE attendance_status ADD VALUE IF NOT EXISTS 'late'"))
     connection.execute(text("ALTER TYPE attendance_status ADD VALUE IF NOT EXISTS 'leave'"))
+    connection.execute(text("ALTER TYPE payroll_run_status ADD VALUE IF NOT EXISTS 'calculated'"))
+    connection.execute(text("ALTER TYPE payroll_run_status ADD VALUE IF NOT EXISTS 'finalized'"))
     connection.execute(
         text(
             """
@@ -557,7 +559,7 @@ def apply_schema_updates(connection) -> None:
                 ADD CONSTRAINT uq_attendance_employee_work_date
                 UNIQUE (employee_id, work_date);
             EXCEPTION
-                WHEN duplicate_object THEN NULL;
+                WHEN duplicate_object OR duplicate_table THEN NULL;
             END $$;
             """
         )
@@ -678,6 +680,217 @@ def apply_schema_updates(connection) -> None:
             """
         )
     )
+    payroll_ledger_columns = [
+        ("expected_hours", "NUMERIC(7, 2)", "0.00"),
+        ("hours_logged", "NUMERIC(7, 2)", "0.00"),
+        ("shortfall_hours", "NUMERIC(7, 2)", "0.00"),
+        ("leave_days", "INTEGER", "0"),
+        ("late_count", "INTEGER", "0"),
+        ("base_earned", "NUMERIC(14, 2)", "0.00"),
+        ("overtime_pay", "NUMERIC(14, 2)", "0.00"),
+        ("bonus", "NUMERIC(14, 2)", "0.00"),
+        ("late_deductions", "NUMERIC(14, 2)", "0.00"),
+        ("shortfall_deductions", "NUMERIC(14, 2)", "0.00"),
+        ("other_fines", "NUMERIC(14, 2)", "0.00"),
+        ("total_deductions", "NUMERIC(14, 2)", "0.00"),
+    ]
+    for column_name, column_type, default_value in payroll_ledger_columns:
+        connection.execute(
+            text(
+                f"""
+                ALTER TABLE payroll_ledger
+                ADD COLUMN IF NOT EXISTS {column_name} {column_type} DEFAULT {default_value}
+                """
+            )
+        )
+
+    connection.execute(
+        text(
+            """
+            UPDATE payroll_ledger
+            SET
+                hours_logged = COALESCE(hours_logged, regular_hours + overtime_hours, 0.00),
+                expected_hours = COALESCE(NULLIF(expected_hours, 0.00), regular_hours + overtime_hours, 0.00),
+                shortfall_hours = COALESCE(shortfall_hours, 0.00),
+                leave_days = COALESCE(leave_days, 0),
+                late_count = COALESCE(late_count, 0),
+                base_earned = COALESCE(NULLIF(base_earned, 0.00), gross_pay, 0.00),
+                overtime_pay = COALESCE(overtime_pay, 0.00),
+                bonus = COALESCE(bonus, 0.00),
+                late_deductions = COALESCE(late_deductions, total_penalties, 0.00),
+                shortfall_deductions = COALESCE(shortfall_deductions, 0.00),
+                other_fines = COALESCE(other_fines, 0.00),
+                total_deductions = COALESCE(NULLIF(total_deductions, 0.00), total_advances + total_penalties, 0.00)
+            """
+        )
+    )
+
+    for column_name, _column_type, _default_value in payroll_ledger_columns:
+        connection.execute(text(f"ALTER TABLE payroll_ledger ALTER COLUMN {column_name} SET NOT NULL"))
+
+    payroll_ledger_constraints = [
+        ("ck_payroll_ledger_payroll_ledger_expected_hours_non_negative", "expected_hours >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_hours_logged_non_negative", "hours_logged >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_shortfall_hours_non_negative", "shortfall_hours >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_leave_days_non_negative", "leave_days >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_late_count_non_negative", "late_count >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_base_earned_non_negative", "base_earned >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_overtime_pay_non_negative", "overtime_pay >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_bonus_non_negative", "bonus >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_late_deductions_non_negative", "late_deductions >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_shortfall_deductions_non_negative", "shortfall_deductions >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_other_fines_non_negative", "other_fines >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_total_deductions_non_negative", "total_deductions >= 0"),
+    ]
+    for constraint_name, expression in payroll_ledger_constraints:
+        connection.execute(
+            text(
+                f"""
+                DO $$
+                BEGIN
+                    ALTER TABLE payroll_ledger
+                    ADD CONSTRAINT {constraint_name}
+                    CHECK ({expression});
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                END $$;
+                """
+            )
+        )
+
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS status payroll_run_status DEFAULT 'locked'
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT TRUE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS locked_at TIMESTAMP WITH TIME ZONE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS locked_by UUID
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMP WITH TIME ZONE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS payslip_pdf_path VARCHAR(255)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS payslip_generated_at TIMESTAMP WITH TIME ZONE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS payslip_zip_path VARCHAR(255)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            ALTER TABLE payroll_ledger
+            ADD COLUMN IF NOT EXISTS payslip_zip_generated_at TIMESTAMP WITH TIME ZONE
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE payroll_ledger
+            SET
+                status = COALESCE(status, 'locked'),
+                is_locked = COALESCE(is_locked, TRUE),
+                locked_at = COALESCE(locked_at, created_at, NOW()),
+                locked_by = COALESCE(locked_by, created_by_id),
+                finalized_at = COALESCE(finalized_at, locked_at, created_at, NOW())
+            """
+        )
+    )
+    connection.execute(text("ALTER TABLE payroll_ledger ALTER COLUMN status SET NOT NULL"))
+    connection.execute(text("ALTER TABLE payroll_ledger ALTER COLUMN is_locked SET NOT NULL"))
+    connection.execute(text("ALTER TABLE payroll_ledger ALTER COLUMN locked_at SET NOT NULL"))
+    connection.execute(text("ALTER TABLE payroll_ledger ALTER COLUMN finalized_at SET NOT NULL"))
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE payroll_ledger
+                ADD CONSTRAINT ck_payroll_ledger_payroll_ledger_locked_snapshot
+                CHECK (is_locked = TRUE);
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                ALTER TABLE payroll_ledger
+                ADD CONSTRAINT fk_payroll_ledger_locked_by_users
+                FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE SET NULL;
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_payroll_ledger_month_year_locked
+            ON payroll_ledger (month_year, is_locked)
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_payroll_ledger_payslip_pdf_path
+            ON payroll_ledger (payslip_pdf_path)
+            """
+        )
+    )
 
 
 def normalized_catalog_name(value: str) -> str:
@@ -765,7 +978,8 @@ def seed_default_admin(connection) -> None:
         settings.is_production
         and settings.bootstrap_admin_password in INSECURE_BOOTSTRAP_ADMIN_PASSWORDS
     ):
-        raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD must be replaced before seeding a production admin")
+        print("Production bootstrap admin seeding skipped; create the first admin via /api/auth/register")
+        return
 
     admin = UserCreate(
         email=settings.bootstrap_admin_email,
@@ -799,7 +1013,7 @@ def init_db() -> None:
             seed_catalogs_from_existing_employees(connection)
             seed_default_admin(connection)
     except (SQLAlchemyError, ValidationError, ValueError) as exc:
-        raise RuntimeError("Database initialization failed") from exc
+        raise RuntimeError(f"Database initialization failed: {exc.__class__.__name__}") from exc
 
 
 if __name__ == "__main__":

@@ -95,7 +95,10 @@ def ensure_attendance_month_unlocked(db: Session, work_date: date_type) -> None:
     lock_payroll_month(db, month_year)
     locked_ledger_id = db.scalar(
         select(PayrollLedger.id)
-        .where(PayrollLedger.month_year == month_year)
+        .where(
+            PayrollLedger.month_year == month_year,
+            PayrollLedger.is_locked.is_(True),
+        )
         .limit(1)
     )
     if locked_ledger_id is not None:

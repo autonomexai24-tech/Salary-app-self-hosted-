@@ -9,6 +9,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     Image,
     Paragraph,
@@ -30,6 +31,14 @@ def money_text(value: Decimal | int | str) -> str:
 
 def decimal_text(value: Decimal | int | str) -> str:
     return f"{Decimal(str(value)):,.2f}"
+
+
+def timestamp_text(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%d %b %Y %H:%M UTC")
 
 
 def safe_text(value: object | None) -> str:
@@ -93,9 +102,16 @@ def build_payslip_pdf(
     *,
     company_settings: CompanySettings,
     upload_dir: Path,
+    generated_at: datetime | None = None,
 ) -> bytes:
     from io import BytesIO
 
+    class DeterministicCanvas(canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            kwargs["invariant"] = 1
+            super().__init__(*args, **kwargs)
+
+    generated_at = generated_at or ledger_row.payslip_generated_at or ledger_row.locked_at
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -159,13 +175,16 @@ def build_payslip_pdf(
     )
 
     period = f"{ledger_row.period_start:%d %b %Y} to {ledger_row.period_end:%d %b %Y}"
-    generated_at = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    generated_at_display = timestamp_text(generated_at)
+    locked_at_display = timestamp_text(ledger_row.locked_at)
+    finalized_at_display = timestamp_text(ledger_row.finalized_at)
     employee_table = Table(
         [
             ["Employee", ledger_row.employee_name, "Period", period],
             ["Code", ledger_row.employee_code, "Month", ledger_row.month_year],
             ["Department", ledger_row.department, "Designation", ledger_row.designation],
-            ["Generated", generated_at, "", ""],
+            ["Generated", generated_at_display, "Ledger ID", str(ledger_row.id)],
+            ["Locked", locked_at_display, "Finalized", finalized_at_display],
         ],
         colWidths=[24 * mm, 66 * mm, 24 * mm, 60 * mm],
     )
@@ -184,18 +203,29 @@ def build_payslip_pdf(
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("SPAN", (3, 3), (3, 3)),
             ]
         )
     )
 
     attendance_table = Table(
         [
-            ["Days Present", "Regular Hours", "Overtime Hours"],
+            ["Days Present", "Expected Hours", "Logged Hours"],
             [
                 str(ledger_row.days_present),
+                decimal_text(ledger_row.expected_hours),
+                decimal_text(ledger_row.hours_logged),
+            ],
+            ["Regular Hours", "Overtime Hours", "Shortfall Hours"],
+            [
                 decimal_text(ledger_row.regular_hours),
                 decimal_text(ledger_row.overtime_hours),
+                decimal_text(ledger_row.shortfall_hours),
+            ],
+            ["Paid Leave Days", "Late Count", "Status"],
+            [
+                str(ledger_row.leave_days),
+                str(ledger_row.late_count),
+                ledger_row.status.value if hasattr(ledger_row.status, "value") else str(ledger_row.status),
             ],
         ],
         colWidths=[58 * mm, 58 * mm, 58 * mm],
@@ -218,9 +248,15 @@ def build_payslip_pdf(
     pay_table = Table(
         [
             ["Description", "Amount"],
-            ["Gross Pay", money_text(ledger_row.gross_pay)],
-            ["Advances", f"({money_text(ledger_row.total_advances)})"],
-            ["Penalties", f"({money_text(ledger_row.total_penalties)})"],
+            ["Base Earned", money_text(ledger_row.base_earned)],
+            ["Overtime Pay", money_text(ledger_row.overtime_pay)],
+            ["Bonus / Incentive", money_text(ledger_row.bonus)],
+            ["Gross Earnings", money_text(ledger_row.gross_pay)],
+            ["Advance Recovery", f"({money_text(ledger_row.total_advances)})"],
+            ["Late Deductions", f"({money_text(ledger_row.late_deductions)})"],
+            ["Shortfall Deductions", f"({money_text(ledger_row.shortfall_deductions)})"],
+            ["Other Fines", f"({money_text(ledger_row.other_fines)})"],
+            ["Total Deductions", f"({money_text(ledger_row.total_deductions)})"],
             ["Net Pay", money_text(ledger_row.net_pay)],
         ],
         colWidths=[116 * mm, 58 * mm],
@@ -257,5 +293,5 @@ def build_payslip_pdf(
             muted_style,
         ),
     ]
-    doc.build(story)
+    doc.build(story, canvasmaker=DeterministicCanvas)
     return buffer.getvalue()

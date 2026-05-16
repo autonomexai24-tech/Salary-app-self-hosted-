@@ -4,17 +4,20 @@ FROM node:20-alpine AS frontend-build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm install
+RUN npm ci
 
 COPY . .
 ARG VITE_API_URL
+ARG VITE_API_BASE_URL
 ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 RUN npm run build
 
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
-    APP_ENV=development \
+    APP_ENV=production \
+    UPLOAD_PATH=/app/backend/uploads \
     UPLOAD_DIR=/app/backend/uploads
 
 WORKDIR /app
@@ -33,7 +36,7 @@ COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 COPY --from=frontend-build /app/dist /usr/share/nginx/html
 
 RUN chmod +x /app/docker-entrypoint.sh \
-    && mkdir -p /app/backend/uploads
+    && mkdir -p /app/backend/uploads/logos /app/backend/uploads/payslips
 
 EXPOSE 80
 

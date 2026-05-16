@@ -36,7 +36,7 @@ Run the frontend:
 npm run dev
 ```
 
-The Vite dev app uses `http://localhost:8000` as its default API URL. Override it with `VITE_API_BASE_URL` if needed.
+The Vite dev app uses same-origin API paths by default. Override it with `VITE_API_URL` or `VITE_API_BASE_URL` if needed.
 
 ## Easypanel Deployment
 
@@ -55,10 +55,11 @@ Set these environment variables in Easypanel:
 
 ```bash
 APP_ENV=production
-DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DB_NAME
+DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST:5432/DB_NAME
 JWT_SECRET_KEY=<random-long-secret-at-least-32-characters>
-ALLOWED_ORIGINS=https://your-app-domain.example
-UPLOAD_DIR=/app/backend/uploads
+CORS_ORIGINS=https://your-app-domain.example
+FRONTEND_URL=https://your-app-domain.example
+UPLOAD_PATH=/app/backend/uploads
 UPLOAD_URL_PATH=/uploads
 ```
 
@@ -68,23 +69,29 @@ Optional environment variables:
 APP_NAME=Payroll OS Backend
 DB_POOL_SIZE=5
 DB_MAX_OVERFLOW=10
+DB_POOL_RECYCLE_SECONDS=1800
+DB_POOL_TIMEOUT_SECONDS=30
+DB_STARTUP_RETRIES=30
+DB_STARTUP_RETRY_SECONDS=2
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 PASSWORD_BCRYPT_ROUNDS=12
 MAX_LOGO_UPLOAD_BYTES=2097152
 ```
 
-For persistent company logos, mount a volume at:
+For persistent company logos, locked payslip PDFs, and payslip ZIP exports, mount a read-write volume at:
 
 ```bash
 /app/backend/uploads
 ```
+
+This path must match `UPLOAD_PATH`. The app validates the directory and creates the `logos/` and `payslips/` subdirectories during startup.
 
 ## First Admin User
 
 After deployment, create the initial admin user once:
 
 ```bash
-curl -X POST https://your-app-domain.example/auth/register \
+curl -X POST https://your-app-domain.example/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","full_name":"Admin User","password":"replace-with-a-strong-password"}'
 ```

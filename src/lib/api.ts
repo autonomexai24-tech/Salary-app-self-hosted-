@@ -202,12 +202,33 @@ export interface BackendPayrollLine {
   department: string;
   designation: string;
   days_present: number;
+  expected_hours?: string | number;
+  hours_logged?: string | number;
   regular_hours: string | number;
   overtime_hours: string | number;
+  shortfall_hours?: string | number;
+  leave_days?: number;
+  late_count?: number;
+  base_earned?: string | number;
+  overtime_pay?: string | number;
+  bonus?: string | number;
   gross_pay: string | number;
   total_advances: string | number;
+  late_deductions?: string | number;
+  shortfall_deductions?: string | number;
+  other_fines?: string | number;
   total_penalties: string | number;
+  total_deductions?: string | number;
   net_pay: string | number;
+  status?: "draft" | "calculated" | "locked" | "finalized" | "paid";
+  is_locked?: boolean;
+  locked_at?: string | null;
+  locked_by?: string | null;
+  finalized_at?: string | null;
+  payslip_pdf_path?: string | null;
+  payslip_generated_at?: string | null;
+  payslip_zip_path?: string | null;
+  payslip_zip_generated_at?: string | null;
   id?: string;
   created_at?: string;
 }
@@ -215,10 +236,14 @@ export interface BackendPayrollLine {
 export interface BackendPayrollPreview {
   period_start: string;
   period_end: string;
+  status?: "calculated";
   line_items: BackendPayrollLine[];
+  total_base?: string | number;
+  total_overtime?: string | number;
   total_gross: string | number;
   total_advances: string | number;
   total_penalties: string | number;
+  total_deductions?: string | number;
   total_net: string | number;
 }
 
@@ -226,10 +251,18 @@ export interface BackendPayrollLedger {
   month_year: string;
   period_start: string;
   period_end: string;
+  status?: "draft" | "calculated" | "locked" | "finalized" | "paid";
+  is_locked?: boolean;
+  locked_at?: string | null;
+  locked_by?: string | null;
+  finalized_at?: string | null;
   items: BackendPayrollLine[];
+  total_base?: string | number;
+  total_overtime?: string | number;
   total_gross: string | number;
   total_advances: string | number;
   total_penalties: string | number;
+  total_deductions?: string | number;
   total_net: string | number;
   saved_at?: string | null;
 }
@@ -281,6 +314,10 @@ export interface BackendMonthlyAttendanceSummary {
 
 export interface BackendMonthlyPayrollSummary {
   month_year?: string;
+  status?: "draft" | "calculated" | "locked" | "finalized" | "paid";
+  is_locked?: boolean;
+  locked_at?: string | null;
+  finalized_at?: string | null;
   locked_payroll_count?: number;
   total_gross?: string | number;
   total_advances?: string | number;
@@ -289,6 +326,12 @@ export interface BackendMonthlyPayrollSummary {
   total_base?: string | number;
   total_overtime?: string | number;
   total_deductions?: string | number;
+}
+
+export interface PayrollOverridePayload {
+  employee_id: string;
+  bonus?: number;
+  other_fines?: number;
 }
 
 interface TokenResponse {
@@ -725,10 +768,15 @@ export function monthRangeFromDate(date: Date): { periodStart: string; periodEnd
   };
 }
 
-export async function readPayrollPreview(month: Date): Promise<BackendPayrollPreview> {
+function payrollOverrideBody(overrides: PayrollOverridePayload[]): BodyInit | undefined {
+  return overrides.length > 0 ? JSON.stringify({ overrides }) : undefined;
+}
+
+export async function readPayrollPreview(month: Date, overrides: PayrollOverridePayload[] = []): Promise<BackendPayrollPreview> {
   const monthYear = monthYearFromDate(month);
   return jsonRequest<BackendPayrollPreview>(`/api/payroll/preview/${encodeURIComponent(monthYear)}`, {
     method: "POST",
+    body: payrollOverrideBody(overrides),
   });
 }
 
@@ -736,9 +784,10 @@ export async function readPayrollLedger(monthYear: string): Promise<BackendPayro
   return jsonRequest<BackendPayrollLedger>(`/api/payroll/ledger/${encodeURIComponent(monthYear)}`);
 }
 
-export async function lockPayrollLedger(monthYear: string): Promise<BackendPayrollLedger> {
+export async function lockPayrollLedger(monthYear: string, overrides: PayrollOverridePayload[] = []): Promise<BackendPayrollLedger> {
   return jsonRequest<BackendPayrollLedger>(`/api/payroll/lock/${encodeURIComponent(monthYear)}`, {
     method: "POST",
+    body: payrollOverrideBody(overrides),
   });
 }
 

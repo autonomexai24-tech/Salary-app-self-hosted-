@@ -1,4 +1,8 @@
-const configuredBaseUrl = import.meta.env.VITE_API_URL?.trim() ?? "";
+const configuredBaseUrl = (
+  import.meta.env.VITE_API_URL ??
+  import.meta.env.VITE_API_BASE_URL ??
+  ""
+).trim();
 
 export const API_BASE_URL = configuredBaseUrl.replace(/\/+$/, "");
 export const AUTH_TOKEN_KEY = "payroll_auth_token";

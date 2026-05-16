@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 try:
     from .database import get_db
-    from .models import AttendanceEntry, AttendanceStatus, Employee, PayrollLedger, User
+    from .models import AttendanceEntry, AttendanceStatus, Employee, PayrollLedger, PayrollRunStatus, User
     from .schemas import (
         DashboardAttendanceSummaryRead,
         DashboardEmployeeSummaryRead,
@@ -22,7 +22,7 @@ try:
     from .utils.payroll_helpers import format_month_year, money, parse_month_year
 except ImportError:
     from database import get_db
-    from models import AttendanceEntry, AttendanceStatus, Employee, PayrollLedger, User
+    from models import AttendanceEntry, AttendanceStatus, Employee, PayrollLedger, PayrollRunStatus, User
     from schemas import (
         DashboardAttendanceSummaryRead,
         DashboardEmployeeSummaryRead,
@@ -76,23 +76,36 @@ def build_monthly_payroll_summary(
     row = db.execute(
         select(
             func.count(PayrollLedger.id).label("locked_payroll_count"),
+            coalesced_sum(PayrollLedger.base_earned).label("total_base"),
+            coalesced_sum(PayrollLedger.overtime_pay).label("total_overtime"),
             coalesced_sum(PayrollLedger.gross_pay).label("total_gross"),
             coalesced_sum(PayrollLedger.total_advances).label("total_advances"),
             coalesced_sum(PayrollLedger.total_penalties).label("total_penalties"),
+            coalesced_sum(PayrollLedger.total_deductions).label("total_deductions"),
             coalesced_sum(PayrollLedger.net_pay).label("total_net"),
             func.max(PayrollLedger.created_at).label("saved_at"),
+            func.min(PayrollLedger.locked_at).label("locked_at"),
+            func.min(PayrollLedger.finalized_at).label("finalized_at"),
         ).where(PayrollLedger.month_year == month_year)
     ).one()
     data = row._mapping
+    locked_payroll_count = integer_count(data["locked_payroll_count"])
 
     return MonthlyPayrollSummaryRead(
         month_year=month_year,
         period_start=period_start,
         period_end=period_end,
-        locked_payroll_count=integer_count(data["locked_payroll_count"]),
+        status=PayrollRunStatus.LOCKED if locked_payroll_count > 0 else PayrollRunStatus.DRAFT,
+        is_locked=locked_payroll_count > 0,
+        locked_at=data["locked_at"],
+        finalized_at=data["finalized_at"],
+        locked_payroll_count=locked_payroll_count,
+        total_base=decimal_money(data["total_base"]),
+        total_overtime=decimal_money(data["total_overtime"]),
         total_gross=decimal_money(data["total_gross"]),
         total_advances=decimal_money(data["total_advances"]),
         total_penalties=decimal_money(data["total_penalties"]),
+        total_deductions=decimal_money(data["total_deductions"]),
         total_net=decimal_money(data["total_net"]),
         saved_at=data["saved_at"],
     )

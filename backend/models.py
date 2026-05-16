@@ -47,7 +47,9 @@ class AttendanceStatus(str, enum.Enum):
 
 class PayrollRunStatus(str, enum.Enum):
     DRAFT = "draft"
+    CALCULATED = "calculated"
     LOCKED = "locked"
+    FINALIZED = "finalized"
     PAID = "paid"
 
 
@@ -547,14 +549,28 @@ class PayrollLedger(Base):
         CheckConstraint("length(month_year) = 7", name="payroll_ledger_month_year_format"),
         CheckConstraint("period_end >= period_start", name="payroll_ledger_valid_period"),
         CheckConstraint("days_present >= 0", name="payroll_ledger_days_present_non_negative"),
+        CheckConstraint("expected_hours >= 0", name="payroll_ledger_expected_hours_non_negative"),
+        CheckConstraint("hours_logged >= 0", name="payroll_ledger_hours_logged_non_negative"),
         CheckConstraint("regular_hours >= 0", name="payroll_ledger_regular_hours_non_negative"),
         CheckConstraint("overtime_hours >= 0", name="payroll_ledger_overtime_hours_non_negative"),
+        CheckConstraint("shortfall_hours >= 0", name="payroll_ledger_shortfall_hours_non_negative"),
+        CheckConstraint("leave_days >= 0", name="payroll_ledger_leave_days_non_negative"),
+        CheckConstraint("late_count >= 0", name="payroll_ledger_late_count_non_negative"),
+        CheckConstraint("base_earned >= 0", name="payroll_ledger_base_earned_non_negative"),
+        CheckConstraint("overtime_pay >= 0", name="payroll_ledger_overtime_pay_non_negative"),
+        CheckConstraint("bonus >= 0", name="payroll_ledger_bonus_non_negative"),
         CheckConstraint("gross_pay >= 0", name="payroll_ledger_gross_pay_non_negative"),
         CheckConstraint("total_advances >= 0", name="payroll_ledger_advances_non_negative"),
+        CheckConstraint("late_deductions >= 0", name="payroll_ledger_late_deductions_non_negative"),
+        CheckConstraint("shortfall_deductions >= 0", name="payroll_ledger_shortfall_deductions_non_negative"),
+        CheckConstraint("other_fines >= 0", name="payroll_ledger_other_fines_non_negative"),
         CheckConstraint("total_penalties >= 0", name="payroll_ledger_penalties_non_negative"),
+        CheckConstraint("total_deductions >= 0", name="payroll_ledger_total_deductions_non_negative"),
         CheckConstraint("net_pay >= 0", name="payroll_ledger_net_pay_non_negative"),
+        CheckConstraint("is_locked = true", name="payroll_ledger_locked_snapshot"),
         Index("ix_payroll_ledger_month_year", "month_year"),
         Index("ix_payroll_ledger_period", "period_start", "period_end"),
+        Index("ix_payroll_ledger_month_year_locked", "month_year", "is_locked"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -576,12 +592,54 @@ class PayrollLedger(Base):
     department: Mapped[str] = mapped_column(String(100), nullable=False)
     designation: Mapped[str] = mapped_column(String(120), nullable=False)
     days_present: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expected_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
+    hours_logged: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
     regular_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
     overtime_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
+    shortfall_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
+    leave_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    late_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    base_earned: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    overtime_pay: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    bonus: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     gross_pay: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     total_advances: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    late_deductions: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    shortfall_deductions: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    other_fines: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     total_penalties: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    total_deductions: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     net_pay: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    payslip_pdf_path: Mapped[str | None] = mapped_column(String(255))
+    payslip_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payslip_zip_path: Mapped[str | None] = mapped_column(String(255))
+    payslip_zip_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[PayrollRunStatus] = mapped_column(
+        Enum(
+            PayrollRunStatus,
+            name="payroll_run_status",
+            values_callable=enum_values,
+        ),
+        default=PayrollRunStatus.LOCKED,
+        nullable=False,
+        index=True,
+    )
+    is_locked: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    locked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    locked_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    finalized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -594,4 +652,5 @@ class PayrollLedger(Base):
     )
 
     employee: Mapped[Employee] = relationship()
-    created_by: Mapped[User | None] = relationship()
+    created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_id])
+    locked_by_user: Mapped[User | None] = relationship(foreign_keys=[locked_by])
