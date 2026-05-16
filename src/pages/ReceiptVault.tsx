@@ -31,7 +31,6 @@ import {
 } from "@/lib/api";
 import { toast } from "sonner";
 
-// ---------- Hourly-based payslip data ----------
 interface ApprovedPayslip {
   employeeId: string;
   name: string;
@@ -53,16 +52,22 @@ interface ApprovedPayslip {
   backendOvertimeHours?: number;
 }
 
-const APPROVED_PAYSLIPS: ApprovedPayslip[] = [
-  { employeeId: "e1", name: "Rajesh Kumar", avatar: "RK", department: "Printing", designation: "Operator", baseSalary: 20800, standardHours: 208, hoursLogged: 218, hourlyRate: 100, paidLeaves: 0, leaveBalance: 10, advancesTaken: 2000, professionalTax: 200, bonus: 0 },
-  { employeeId: "e2", name: "Priya Sharma", avatar: "PS", department: "Binding", designation: "Senior Binder", baseSalary: 19500, standardHours: 208, hoursLogged: 208, hourlyRate: 93.75, paidLeaves: 0, leaveBalance: 8, advancesTaken: 0, professionalTax: 200, bonus: 0 },
-  { employeeId: "e3", name: "Amit Patel", avatar: "AP", department: "Design", designation: "Graphic Designer", baseSalary: 31200, standardHours: 208, hoursLogged: 224, hourlyRate: 150, paidLeaves: 0, leaveBalance: 12, advancesTaken: 5000, professionalTax: 200, bonus: 0 },
-  { employeeId: "e4", name: "Sunita Devi", avatar: "SD", department: "Cutting", designation: "Cutting Operator", baseSalary: 18200, standardHours: 208, hoursLogged: 192, hourlyRate: 87.5, paidLeaves: 1, leaveBalance: 6, advancesTaken: 1500, professionalTax: 200, bonus: 0 },
-  { employeeId: "e5", name: "Vikram Singh", avatar: "VS", department: "Printing", designation: "Lead Operator", baseSalary: 26000, standardHours: 208, hoursLogged: 212, hourlyRate: 125, paidLeaves: 0, leaveBalance: 9, advancesTaken: 3000, professionalTax: 200, bonus: 0 },
-  { employeeId: "e6", name: "Meera Joshi", avatar: "MJ", department: "Admin", designation: "Office Coordinator", baseSalary: 23400, standardHours: 208, hoursLogged: 184, hourlyRate: 112.5, paidLeaves: 2, leaveBalance: 4, advancesTaken: 0, professionalTax: 200, bonus: 0 },
-  { employeeId: "e7", name: "Arjun Reddy", avatar: "AR", department: "Binding", designation: "Helper", baseSalary: 14300, standardHours: 208, hoursLogged: 208, hourlyRate: 68.75, paidLeaves: 0, leaveBalance: 11, advancesTaken: 1000, professionalTax: 0, bonus: 0 },
-  { employeeId: "e8", name: "Kavita Nair", avatar: "KN", department: "Design", designation: "Junior Designer", baseSalary: 22100, standardHours: 208, hoursLogged: 202, hourlyRate: 106.25, paidLeaves: 0, leaveBalance: 7, advancesTaken: 0, professionalTax: 200, bonus: 0 },
-];
+const EMPTY_PAYSLIP: ApprovedPayslip = {
+  employeeId: "",
+  name: "",
+  avatar: "",
+  department: "",
+  designation: "",
+  baseSalary: 0,
+  standardHours: 0,
+  hoursLogged: 0,
+  hourlyRate: 0,
+  paidLeaves: 0,
+  leaveBalance: 0,
+  advancesTaken: 0,
+  professionalTax: 0,
+  bonus: 0,
+};
 
 function getCalcs(p: ApprovedPayslip) {
   const otHours = p.backendOvertimeHours ?? Math.max(0, p.hoursLogged - p.standardHours);
@@ -131,8 +136,8 @@ const fmtInr = (n: number) => n.toLocaleString("en-IN", { minimumFractionDigits:
 export default function ReceiptVault() {
   const [selectedMonth, setSelectedMonth] = useState<Date>(new Date(2026, 2, 1));
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState("e1");
-  const [payslips, setPayslips] = useState(APPROVED_PAYSLIPS);
+  const [selectedId, setSelectedId] = useState("");
+  const [payslips, setPayslips] = useState<ApprovedPayslip[]>([]);
   const [companySettings, setCompanySettings] = useState<BackendCompanySettings | null>(null);
   const selectedMonthYear = useMemo(() => monthYearFromDate(selectedMonth), [selectedMonth]);
 
@@ -175,14 +180,19 @@ export default function ReceiptVault() {
     };
   }, [selectedMonthYear]);
 
-  const selected = payslips.find((p) => p.employeeId === selectedId) ?? payslips[0] ?? APPROVED_PAYSLIPS[0];
+  const selected = payslips.find((p) => p.employeeId === selectedId) ?? payslips[0] ?? EMPTY_PAYSLIP;
   const c = getCalcs(selected);
   const logoUrl = resolveApiAssetUrl(companySettings?.logo_url);
-  const companyName = companySettings?.company_name ?? "PrintWorks Pvt. Ltd.";
-  const companyAddress = companySettings?.address ?? "42 Industrial Area, Sector 7\nNew Delhi — 110020";
+  const companyName = companySettings?.company_name ?? "";
+  const companyAddress = companySettings?.address ?? "";
   const companyAddressLines = companyAddress.split("\n");
 
   const handleDownloadAll = async () => {
+    if (payslips.length === 0) {
+      toast.info("No locked payslips are available for this month.");
+      return;
+    }
+
     try {
       const file = await downloadPayslipsZip(selectedMonthYear);
       downloadBlob(file.blob, file.filename);
@@ -194,6 +204,11 @@ export default function ReceiptVault() {
   };
 
   const handleDownloadPdf = async () => {
+    if (!selected.employeeId) {
+      toast.info("Select a locked payslip before downloading.");
+      return;
+    }
+
     try {
       const file = await downloadPayslipPdf(selectedMonthYear, selected.employeeId);
       downloadBlob(file.blob, file.filename);

@@ -7,42 +7,86 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { CalendarDays, ChevronDown, Clock, Users, UserCheck, UserX, BarChart3, Save, Download, X } from "lucide-react";
+import { CalendarDays, ChevronDown, Clock, Users, UserCheck, UserX, BarChart3, Save, Download } from "lucide-react";
 import { toast } from "sonner";
-import { MOCK_EMPLOYEES, SEED_ATTENDANCE, type AttendanceEntry } from "@/lib/mock-employees";
 import { calculateShiftDetails, getStatusFromEntry } from "@/lib/payroll-utils";
 import { COMPANY_FIXED_SHIFT } from "@/lib/payroll-config";
 import { cn } from "@/lib/utils";
 import {
   apiErrorMessage,
+  type AttendanceEntry,
+  type Employee,
   dateInputValue,
   emptyAttendanceEntry,
   listAttendanceEntries,
   listEmployees,
   mapAttendanceEntryToUi,
   mapEmployeeToUi,
+  monthYearFromDate,
+  readDailyAttendanceSummary,
+  readMonthlyAttendanceSummary,
   saveAttendanceEntry,
+  type BackendDailyAttendanceSummary,
+  type BackendMonthlyAttendanceRow,
 } from "@/lib/api";
 type FilterStatus = "all" | "present" | "late" | "pending";
 
-function buildInitialAttendanceMap() {
-  const map: Record<string, AttendanceEntry> = {};
-  MOCK_EMPLOYEES.forEach((emp) => {
-    const seed = SEED_ATTENDANCE.find((s) => s.employeeId === emp.id);
-    map[emp.id] = seed ?? emptyAttendanceEntry(emp.id);
-  });
-  return map;
+interface MonthlyReportRow {
+  name: string;
+  department: string;
+  workingDays: number;
+  present: number;
+  absent: number;
+  late: number;
+}
+
+function numberFromSummary(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function countFromSummary(summary: BackendDailyAttendanceSummary | null, keys: string[]): number {
+  if (!summary) return 0;
+  for (const key of keys) {
+    const value = (summary as Record<string, unknown>)[key];
+    if (value !== undefined && value !== null) return numberFromSummary(value);
+  }
+  return 0;
+}
+
+function monthlyAttendanceRows(rows: BackendMonthlyAttendanceRow[] = []): MonthlyReportRow[] {
+  return rows.map((row) => ({
+    name: row.employee_name ?? row.name ?? "",
+    department: row.department ?? "",
+    workingDays: numberFromSummary(row.working_days),
+    present: numberFromSummary(row.present ?? row.present_count),
+    absent: numberFromSummary(row.absent ?? row.absent_count),
+    late: numberFromSummary(row.late ?? row.late_count),
+  }));
+}
+
+function reportMonthToMonthYear(value: string): string {
+  const [monthName, year] = value.split("-");
+  const months: Record<string, string> = {
+    january: "01",
+    february: "02",
+    march: "03",
+  };
+  return `${months[monthName] ?? "03"}-${year ?? "2026"}`;
 }
 
 export default function DailyLog() {
-  const [employees, setEmployees] = useState(MOCK_EMPLOYEES);
-  const [attendance, setAttendance] = useState<Record<string, AttendanceEntry>>(() => buildInitialAttendanceMap());
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [attendance, setAttendance] = useState<Record<string, AttendanceEntry>>({});
+  const [dailySummary, setDailySummary] = useState<BackendDailyAttendanceSummary | null>(null);
+  const [monthlyReportRows, setMonthlyReportRows] = useState<MonthlyReportRow[]>([]);
 
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [reportOpen, setReportOpen] = useState(false);
   const [reportMonth, setReportMonth] = useState("march-2026");
   const todayIso = useMemo(() => dateInputValue(new Date()), []);
+  const currentMonthYear = useMemo(() => monthYearFromDate(new Date()), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -85,10 +129,42 @@ export default function DailyLog() {
         });
       });
 
+    readDailyAttendanceSummary(todayIso)
+      .then((summary) => {
+        if (!cancelled) setDailySummary(summary);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load attendance summary", {
+          description: apiErrorMessage(error),
+        });
+      });
+
     return () => {
       cancelled = true;
     };
   }, [todayIso]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const monthYear = reportOpen ? reportMonthToMonthYear(reportMonth) : currentMonthYear;
+
+    readMonthlyAttendanceSummary(monthYear)
+      .then((summary) => {
+        if (cancelled) return;
+        setMonthlyReportRows(monthlyAttendanceRows(summary.items ?? summary.rows ?? summary.employees ?? []));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        toast.error("Could not load monthly attendance summary", {
+          description: apiErrorMessage(error),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentMonthYear, reportMonth, reportOpen]);
 
   const updateAttendance = (empId: string, field: keyof AttendanceEntry, value: string | number) => {
     setAttendance((prev) => ({
@@ -117,6 +193,9 @@ export default function DailyLog() {
       toast.success("Attendance Logged Successfully", {
         description: `${emp?.name ?? "Employee"} — ${savedEntry.timeIn} to ${savedEntry.timeOut}`,
       });
+      readDailyAttendanceSummary(todayIso)
+        .then(setDailySummary)
+        .catch(() => undefined);
     } catch (error) {
       toast.error("Could not save attendance", {
         description: apiErrorMessage(error),
@@ -133,7 +212,7 @@ export default function DailyLog() {
     return map;
   }, [attendance, employees]);
 
-  const counts = useMemo(() => {
+  const derivedCounts = useMemo(() => {
     let present = 0, late = 0, pending = 0;
     Object.values(employeeStatuses).forEach((s) => {
       if (s === "present") present++;
@@ -142,6 +221,16 @@ export default function DailyLog() {
     });
     return { present, late, pending, all: employees.length };
   }, [employeeStatuses, employees.length]);
+
+  const counts = useMemo(() => {
+    if (!dailySummary) return derivedCounts;
+    const present = countFromSummary(dailySummary, ["present_count", "present"]);
+    const late = countFromSummary(dailySummary, ["late_count", "late"]);
+    const absent = countFromSummary(dailySummary, ["absent_count", "absent"]);
+    const pending = countFromSummary(dailySummary, ["pending_count", "pending"]);
+    const all = countFromSummary(dailySummary, ["total_employees", "total_workforce", "total_entries"]) || employees.length;
+    return { present, late, pending: absent + pending, all };
+  }, [dailySummary, derivedCounts, employees.length]);
 
   const filteredEmployees = useMemo(() => {
     if (filter === "all") return employees;
@@ -341,7 +430,7 @@ export default function DailyLog() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {MONTHLY_REPORT_DATA.map((row) => (
+                {monthlyReportRows.map((row) => (
                   <TableRow key={row.name}>
                     <TableCell>
                       <div>
@@ -385,17 +474,6 @@ export default function DailyLog() {
     </div>
   );
 }
-
-const MONTHLY_REPORT_DATA = [
-  { name: "Rajesh Kumar", department: "Printing", workingDays: 26, present: 24, absent: 0, late: 2 },
-  { name: "Priya Sharma", department: "Binding", workingDays: 26, present: 26, absent: 0, late: 0 },
-  { name: "Amit Patel", department: "Design", workingDays: 26, present: 21, absent: 4, late: 1 },
-  { name: "Sunita Devi", department: "Cutting", workingDays: 26, present: 24, absent: 2, late: 0 },
-  { name: "Vikram Singh", department: "Printing", workingDays: 26, present: 26, absent: 0, late: 0 },
-  { name: "Meera Joshi", department: "Admin", workingDays: 26, present: 22, absent: 3, late: 1 },
-  { name: "Arjun Reddy", department: "Binding", workingDays: 26, present: 25, absent: 0, late: 1 },
-  { name: "Kavita Nair", department: "Design", workingDays: 26, present: 23, absent: 2, late: 1 },
-];
 
 // ---------- Sub-components ----------
 

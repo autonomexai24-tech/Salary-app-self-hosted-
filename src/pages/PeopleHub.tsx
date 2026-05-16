@@ -9,30 +9,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Search, UserPlus, Zap, Phone, User, Save } from "lucide-react";
-import { MOCK_EMPLOYEES, type Employee } from "@/lib/mock-employees";
 import { COMPANY_FIXED_SHIFT } from "@/lib/payroll-config";
 import CompanySettings from "@/components/CompanySettings";
-import { apiErrorMessage, createEmployee, listEmployees, mapEmployeeToUi } from "@/lib/api";
+import { apiErrorMessage, createEmployee, listEmployees, mapEmployeeToUi, type Employee } from "@/lib/api";
 import { toast } from "sonner";
 
-const INITIAL_DESIGNATIONS = [
-  "Operator",
-  "Senior Binder",
-  "Graphic Designer",
-  "Lead Operator",
-  "Office Coordinator",
-  "Helper",
-  "Junior Designer",
-];
-
-const INITIAL_DEPARTMENTS = ["Printing", "Binding", "Design", "Cutting", "Admin"];
-
 export default function PeopleHub() {
-  const [designations, setDesignations] = useState(INITIAL_DESIGNATIONS);
-  const [departments, setDepartments] = useState(INITIAL_DEPARTMENTS);
+  const [designations, setDesignations] = useState<string[]>([]);
+  const [departments, setDepartments] = useState<string[]>([]);
 
   // Employee Directory state
-  const [employees, setEmployees] = useState<Employee[]>(MOCK_EMPLOYEES);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [search, setSearch] = useState("");
   const [sheetOpen, setSheetOpen] = useState(false);
 

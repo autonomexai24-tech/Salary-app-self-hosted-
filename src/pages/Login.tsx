@@ -11,15 +11,14 @@ import { apiErrorMessage } from "@/lib/api";
 import { toast } from "sonner";
 
 export default function Login() {
-  const { login, loginAsPrototype } = useAuth();
+  const { login } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleMockLogin = (role: AppRole) => {
-    loginAsPrototype(role);
-    navigate("/");
+    toast.info(`${role === "admin" ? "Admin" : "Operator"} prototype login is disabled for the live backend.`);
   };
 
   const handleLogin = async () => {

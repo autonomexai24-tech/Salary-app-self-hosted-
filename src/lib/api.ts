@@ -1,12 +1,37 @@
-import type { AttendanceEntry, Employee } from "@/lib/mock-employees";
+import {
+  API_BASE_URL,
+  ApiError,
+  clearStoredAuthToken,
+  fileRequest,
+  getStoredAuthToken,
+  jsonRequest,
+  setStoredAuthToken,
+} from "@/lib/apiClient";
 
-const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
-const defaultBaseUrl = import.meta.env.PROD ? "" : "http://localhost:8000";
+export {
+  API_BASE_URL,
+  ApiError,
+  clearStoredAuthToken,
+  getStoredAuthToken,
+  setStoredAuthToken,
+};
 
-export const API_BASE_URL = (configuredBaseUrl ?? defaultBaseUrl).replace(/\/+$/, "");
+export interface Employee {
+  id: string;
+  name: string;
+  department: string;
+  designation: string;
+  dailyRate: number;
+  monthlyBasic: number;
+  avatar: string;
+}
 
-const AUTH_TOKEN_KEY = "payroll_auth_token";
-const DEFAULT_TIMEOUT_MS = 12_000;
+export interface AttendanceEntry {
+  employeeId: string;
+  timeIn: string;
+  timeOut: string;
+  advance: number;
+}
 
 export type BackendRole = "admin" | "staff";
 export type AppRoleFromApi = "admin" | "operator";
@@ -140,26 +165,57 @@ export interface BackendPayrollLedger {
   saved_at?: string | null;
 }
 
-type RequestOptions = RequestInit & {
-  authToken?: string | null;
-  timeoutMs?: number;
-};
+export interface BackendDailyAttendanceSummary {
+  date?: string;
+  total_employees?: number;
+  total_workforce?: number;
+  total_entries?: number;
+  present_count?: number;
+  present?: number;
+  late_count?: number;
+  late?: number;
+  absent_count?: number;
+  absent?: number;
+  pending_count?: number;
+  pending?: number;
+}
+
+export interface BackendMonthlyAttendanceRow {
+  employee_id?: string;
+  employee_name?: string;
+  name?: string;
+  department?: string;
+  working_days?: number;
+  present?: number;
+  present_count?: number;
+  absent?: number;
+  absent_count?: number;
+  late?: number;
+  late_count?: number;
+}
+
+export interface BackendMonthlyAttendanceSummary {
+  month_year?: string;
+  items?: BackendMonthlyAttendanceRow[];
+  rows?: BackendMonthlyAttendanceRow[];
+  employees?: BackendMonthlyAttendanceRow[];
+}
+
+export interface BackendMonthlyPayrollSummary {
+  month_year?: string;
+  locked_payroll_count?: number;
+  total_gross?: string | number;
+  total_advances?: string | number;
+  total_penalties?: string | number;
+  total_net?: string | number;
+  total_base?: string | number;
+  total_overtime?: string | number;
+  total_deductions?: string | number;
+}
 
 interface TokenResponse {
   access_token: string;
   token_type: string;
-}
-
-export class ApiError extends Error {
-  status: number;
-  code?: string;
-
-  constructor(message: string, status = 0, code?: string) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-    this.code = code;
-  }
 }
 
 function numberFromApi(value: string | number | null | undefined): number {
@@ -182,114 +238,6 @@ function toTimeInputValue(value?: string | null): string {
   return value.slice(0, 5);
 }
 
-function buildUrl(path: string): string {
-  if (/^https?:\/\//i.test(path)) return path;
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${API_BASE_URL}${normalizedPath}`;
-}
-
-function apiMessageFromDetail(detail: unknown, fallback: string): { message: string; code?: string } {
-  if (typeof detail === "string") return { message: detail };
-  if (detail && typeof detail === "object") {
-    const candidate = detail as { message?: unknown; code?: unknown; detail?: unknown };
-    if (typeof candidate.message === "string") {
-      return {
-        message: candidate.message,
-        code: typeof candidate.code === "string" ? candidate.code : undefined,
-      };
-    }
-    if (candidate.detail) return apiMessageFromDetail(candidate.detail, fallback);
-  }
-  return { message: fallback };
-}
-
-async function parseErrorResponse(response: Response): Promise<ApiError> {
-  const fallback = `Request failed with status ${response.status}`;
-  try {
-    const body = await response.json();
-    const { message, code } = apiMessageFromDetail(body.detail ?? body, fallback);
-    return new ApiError(message, response.status, code);
-  } catch {
-    return new ApiError(fallback, response.status);
-  }
-}
-
-export function getStoredAuthToken(): string | null {
-  try {
-    return window.localStorage.getItem(AUTH_TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setStoredAuthToken(token: string): void {
-  try {
-    window.localStorage.setItem(AUTH_TOKEN_KEY, token);
-  } catch {
-    // Storage can be unavailable in hardened browser contexts; auth still works in memory.
-  }
-}
-
-export function clearStoredAuthToken(): void {
-  try {
-    window.localStorage.removeItem(AUTH_TOKEN_KEY);
-  } catch {
-    // Ignore storage failures during logout.
-  }
-}
-
-async function request(path: string, options: RequestOptions = {}): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const headers = new Headers(options.headers);
-  const token = options.authToken === undefined ? getStoredAuthToken() : options.authToken;
-  const body = options.body;
-
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (body && !(body instanceof FormData) && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  try {
-    const response = await fetch(buildUrl(path), {
-      ...options,
-      headers,
-      signal: controller.signal,
-    });
-
-    if (!response.ok) throw await parseErrorResponse(response);
-    return response;
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ApiError("The backend took too long to respond. Please try again.", 0, "request_timeout");
-    }
-    throw new ApiError(
-      "Could not reach the backend. Check that the API is running and that CORS allows this frontend.",
-      0,
-      "network_error"
-    );
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
-async function jsonRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const response = await request(path, options);
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
-}
-
-export async function fileRequest(path: string, fallbackFilename: string): Promise<{ blob: Blob; filename: string }> {
-  const response = await request(path);
-  const disposition = response.headers.get("Content-Disposition") ?? "";
-  const filenameMatch = disposition.match(/filename="?([^"]+)"?/i);
-  return {
-    blob: await response.blob(),
-    filename: filenameMatch?.[1] ?? fallbackFilename,
-  };
-}
-
 export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -310,7 +258,7 @@ export function mapBackendUser(user: BackendUser): ApiAuthUser {
 }
 
 export async function loginWithPassword(email: string, password: string): Promise<ApiAuthUser> {
-  const token = await jsonRequest<TokenResponse>("/auth/login", {
+  const token = await jsonRequest<TokenResponse>("/api/auth/login", {
     method: "POST",
     authToken: null,
     body: JSON.stringify({ email, password }),
@@ -326,7 +274,7 @@ export async function loginWithPassword(email: string, password: string): Promis
 }
 
 export async function getCurrentUser(authToken?: string): Promise<ApiAuthUser> {
-  const user = await jsonRequest<BackendUser>("/users/me", {
+  const user = await jsonRequest<BackendUser>("/api/users/me", {
     authToken: authToken ?? getStoredAuthToken(),
   });
   return mapBackendUser(user);
@@ -334,7 +282,7 @@ export async function getCurrentUser(authToken?: string): Promise<ApiAuthUser> {
 
 export async function listUsers(): Promise<BackendUser[]> {
   const params = new URLSearchParams({ limit: "100", offset: "0" });
-  const data = await jsonRequest<BackendUserList>(`/users?${params.toString()}`);
+  const data = await jsonRequest<BackendUserList>(`/api/users/?${params.toString()}`);
   return data.items;
 }
 
@@ -344,7 +292,7 @@ export async function createUser(payload: {
   password: string;
   role: BackendRole;
 }): Promise<BackendUser> {
-  return jsonRequest<BackendUser>("/users", {
+  return jsonRequest<BackendUser>("/api/users/", {
     method: "POST",
     body: JSON.stringify({
       full_name: payload.fullName,
@@ -371,7 +319,7 @@ export function mapEmployeeToUi(employee: BackendEmployee): Employee {
 export async function listEmployees(search?: string): Promise<BackendEmployee[]> {
   const params = new URLSearchParams({ limit: "100", offset: "0" });
   if (search?.trim()) params.set("search", search.trim());
-  const data = await jsonRequest<BackendEmployeeList>(`/employees?${params.toString()}`);
+  const data = await jsonRequest<BackendEmployeeList>(`/api/employees/?${params.toString()}`);
   return data.items;
 }
 
@@ -383,7 +331,7 @@ export async function createEmployee(payload: {
   employeeCode?: string;
 }): Promise<BackendEmployee> {
   const employeeCode = payload.employeeCode ?? `${initialsFromName(payload.fullName) || "EMP"}${Date.now()}`;
-  return jsonRequest<BackendEmployee>("/employees", {
+  return jsonRequest<BackendEmployee>("/api/employees/", {
     method: "POST",
     body: JSON.stringify({
       employee_code: employeeCode,
@@ -411,12 +359,12 @@ export function mapAttendanceEntryToUi(entry: BackendAttendanceEntry): Attendanc
 
 export async function listAttendanceEntries(date: string): Promise<BackendAttendanceEntry[]> {
   const params = new URLSearchParams({ date });
-  const data = await jsonRequest<BackendAttendanceList>(`/attendance?${params.toString()}`);
+  const data = await jsonRequest<BackendAttendanceList>(`/api/attendance/?${params.toString()}`);
   return data.items;
 }
 
 export async function saveAttendanceEntry(entry: AttendanceEntry, date: string): Promise<BackendAttendanceEntry> {
-  return jsonRequest<BackendAttendanceEntry>("/attendance", {
+  return jsonRequest<BackendAttendanceEntry>("/api/attendance/log", {
     method: "POST",
     body: JSON.stringify({
       employee_id: entry.employeeId,
@@ -429,7 +377,7 @@ export async function saveAttendanceEntry(entry: AttendanceEntry, date: string):
 }
 
 export async function readCompanySettings(): Promise<BackendCompanySettings> {
-  return jsonRequest<BackendCompanySettings>("/company-settings", { authToken: null });
+  return jsonRequest<BackendCompanySettings>("/api/settings/");
 }
 
 export async function updateCompanySettings(payload: Partial<{
@@ -444,7 +392,7 @@ export async function updateCompanySettings(payload: Partial<{
   grace_period_minutes: number;
   overtime_multiplier: number;
 }>): Promise<BackendCompanySettings> {
-  return jsonRequest<BackendCompanySettings>("/company-settings", {
+  return jsonRequest<BackendCompanySettings>("/api/settings/", {
     method: "PUT",
     body: JSON.stringify(payload),
   });
@@ -453,7 +401,7 @@ export async function updateCompanySettings(payload: Partial<{
 export async function uploadCompanyLogo(file: File): Promise<BackendCompanySettings> {
   const formData = new FormData();
   formData.append("file", file);
-  return jsonRequest<BackendCompanySettings>("/company-settings/logo", {
+  return jsonRequest<BackendCompanySettings>("/api/settings/logo", {
     method: "POST",
     body: formData,
   });
@@ -462,7 +410,8 @@ export async function uploadCompanyLogo(file: File): Promise<BackendCompanySetti
 export function resolveApiAssetUrl(path?: string | null): string | null {
   if (!path) return null;
   if (/^https?:\/\//i.test(path)) return path;
-  return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+  const assetBaseUrl = API_BASE_URL.endsWith("/api") ? API_BASE_URL.slice(0, -4) : API_BASE_URL;
+  return `${assetBaseUrl}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 export function monthYearFromDate(date: Date): string {
@@ -486,34 +435,46 @@ export function monthRangeFromDate(date: Date): { periodStart: string; periodEnd
 }
 
 export async function readPayrollPreview(month: Date): Promise<BackendPayrollPreview> {
-  const { periodStart, periodEnd } = monthRangeFromDate(month);
-  const params = new URLSearchParams({
-    period_start: periodStart,
-    period_end: periodEnd,
+  const monthYear = monthYearFromDate(month);
+  return jsonRequest<BackendPayrollPreview>(`/api/payroll/preview/${encodeURIComponent(monthYear)}`, {
+    method: "POST",
   });
-  return jsonRequest<BackendPayrollPreview>(`/payroll/preview?${params.toString()}`);
 }
 
 export async function readPayrollLedger(monthYear: string): Promise<BackendPayrollLedger> {
-  return jsonRequest<BackendPayrollLedger>(`/payroll/ledger/${monthYear}`);
+  return jsonRequest<BackendPayrollLedger>(`/api/payroll/ledger/${encodeURIComponent(monthYear)}`);
 }
 
-export async function savePayrollLedger(monthYear: string): Promise<BackendPayrollLedger> {
-  return jsonRequest<BackendPayrollLedger>("/payroll/ledger", {
+export async function lockPayrollLedger(monthYear: string): Promise<BackendPayrollLedger> {
+  return jsonRequest<BackendPayrollLedger>(`/api/payroll/lock/${encodeURIComponent(monthYear)}`, {
     method: "POST",
-    body: JSON.stringify({ month_year: monthYear }),
   });
 }
 
 export async function downloadPayslipPdf(monthYear: string, employeeId: string): Promise<{ blob: Blob; filename: string }> {
   return fileRequest(
-    `/payroll/ledger/${monthYear}/payslips/${employeeId}/pdf`,
+    `/api/receipts/generate/${encodeURIComponent(employeeId)}/${encodeURIComponent(monthYear)}`,
     `payslip-${monthYear}-${employeeId}.pdf`
   );
 }
 
 export async function downloadPayslipsZip(monthYear: string): Promise<{ blob: Blob; filename: string }> {
-  return fileRequest(`/payroll/ledger/${monthYear}/payslips.zip`, `payslips-${monthYear}.zip`);
+  return fileRequest(`/api/receipts/generate-all/${encodeURIComponent(monthYear)}`, `payslips-${monthYear}.zip`);
+}
+
+export async function readDailyAttendanceSummary(date: string): Promise<BackendDailyAttendanceSummary> {
+  const params = new URLSearchParams({ date });
+  return jsonRequest<BackendDailyAttendanceSummary>(`/api/dashboard/daily-attendance?${params.toString()}`);
+}
+
+export async function readMonthlyAttendanceSummary(monthYear: string): Promise<BackendMonthlyAttendanceSummary> {
+  const params = new URLSearchParams({ month: monthYear, month_year: monthYear });
+  return jsonRequest<BackendMonthlyAttendanceSummary>(`/api/dashboard/monthly-attendance?${params.toString()}`);
+}
+
+export async function readMonthlyPayrollSummary(monthYear: string): Promise<BackendMonthlyPayrollSummary> {
+  const params = new URLSearchParams({ month: monthYear, month_year: monthYear });
+  return jsonRequest<BackendMonthlyPayrollSummary>(`/api/dashboard/monthly-payroll?${params.toString()}`);
 }
 
 export function apiErrorMessage(error: unknown): string {

@@ -14,8 +14,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import {
   CalendarIcon,
   CheckCircle2,
-  Clock,
-  CreditCard,
   IndianRupee,
   TrendingDown,
   TrendingUp,
@@ -32,15 +30,16 @@ import {
   initialsFromName,
   listEmployees,
   monthYearFromDate,
+  readMonthlyPayrollSummary,
   readPayrollLedger,
   readPayrollPreview,
-  savePayrollLedger,
+  lockPayrollLedger,
+  type BackendMonthlyPayrollSummary,
   type BackendEmployee,
   type BackendPayrollLine,
 } from "@/lib/api";
 import { toast } from "sonner";
 
-// ---------- Types & Mock Data ----------
 interface PayrollRow {
   employeeId: string;
   name: string;
@@ -58,17 +57,6 @@ interface PayrollRow {
   backendNetPay?: number;
   backendOvertimeHours?: number;
 }
-
-const MOCK_PAYROLL: PayrollRow[] = [
-  { employeeId: "e1", name: "Rajesh Kumar", avatar: "RK", role: "Printing Operator", department: "Printing", baseSalary: 20800, standardHours: 208, hoursLogged: 218, hourlyRate: 100, paidLeaves: 0, advancesTaken: 2000 },
-  { employeeId: "e2", name: "Priya Sharma", avatar: "PS", role: "Senior Binder", department: "Binding", baseSalary: 19500, standardHours: 208, hoursLogged: 198, hourlyRate: 93.75, paidLeaves: 0, advancesTaken: 0 },
-  { employeeId: "e3", name: "Amit Patel", avatar: "AP", role: "Graphic Designer", department: "Design", baseSalary: 31200, standardHours: 208, hoursLogged: 224, hourlyRate: 150, paidLeaves: 0, advancesTaken: 5000 },
-  { employeeId: "e4", name: "Sunita Devi", avatar: "SD", role: "Cutting Operator", department: "Cutting", baseSalary: 18200, standardHours: 208, hoursLogged: 192, hourlyRate: 87.5, paidLeaves: 1, advancesTaken: 1500 },
-  { employeeId: "e5", name: "Vikram Singh", avatar: "VS", role: "Press Operator", department: "Printing", baseSalary: 26000, standardHours: 208, hoursLogged: 212, hourlyRate: 125, paidLeaves: 0, advancesTaken: 3000 },
-  { employeeId: "e6", name: "Meera Joshi", avatar: "MJ", role: "Admin Executive", department: "Admin", baseSalary: 23400, standardHours: 208, hoursLogged: 184, hourlyRate: 112.5, paidLeaves: 2, advancesTaken: 0 },
-  { employeeId: "e7", name: "Arjun Reddy", avatar: "AR", role: "Binder", department: "Binding", baseSalary: 14300, standardHours: 208, hoursLogged: 208, hourlyRate: 68.75, paidLeaves: 0, advancesTaken: 1000 },
-  { employeeId: "e8", name: "Kavita Nair", avatar: "KN", role: "Junior Designer", department: "Design", baseSalary: 22100, standardHours: 208, hoursLogged: 202, hourlyRate: 106.25, paidLeaves: 0, advancesTaken: 0 },
-];
 
 /**
  * Pure function: Net Payable calculation
@@ -124,7 +112,8 @@ export default function PayrollEngine() {
   const [bonus, setBonus] = useState("");
   const [fines, setFines] = useState("");
   const [employeeRecords, setEmployeeRecords] = useState<BackendEmployee[]>([]);
-  const [payrollRows, setPayrollRows] = useState<PayrollRow[]>(MOCK_PAYROLL);
+  const [payrollRows, setPayrollRows] = useState<PayrollRow[]>([]);
+  const [monthlyPayrollSummary, setMonthlyPayrollSummary] = useState<BackendMonthlyPayrollSummary | null>(null);
   const [isSavingPayroll, setIsSavingPayroll] = useState(false);
   const selectedMonthYear = useMemo(() => monthYearFromDate(selectedMonth), [selectedMonth]);
 
@@ -136,6 +125,14 @@ export default function PayrollEngine() {
         const employees = await listEmployees();
         if (cancelled) return;
         setEmployeeRecords(employees);
+
+        readMonthlyPayrollSummary(selectedMonthYear)
+          .then((summary) => {
+            if (!cancelled) setMonthlyPayrollSummary(summary);
+          })
+          .catch(() => {
+            if (!cancelled) setMonthlyPayrollSummary(null);
+          });
 
         const preview = await readPayrollPreview(selectedMonth);
         if (cancelled) return;
@@ -172,10 +169,18 @@ export default function PayrollEngine() {
     setFines("");
   };
 
-  const bonusVal = Number(bonus) || 0;
-  const finesVal = Number(fines) || 0;
-
   const pulse = useMemo(() => {
+    if (monthlyPayrollSummary) {
+      const totalDeductions = numberFromApi(monthlyPayrollSummary.total_deductions)
+        || numberFromApi(monthlyPayrollSummary.total_advances) + numberFromApi(monthlyPayrollSummary.total_penalties);
+      return {
+        totalBase: numberFromApi(monthlyPayrollSummary.total_base ?? monthlyPayrollSummary.total_gross),
+        totalOT: numberFromApi(monthlyPayrollSummary.total_overtime),
+        totalDeductions,
+        totalNet: numberFromApi(monthlyPayrollSummary.total_net),
+      };
+    }
+
     let totalBase = 0, totalOT = 0, totalDeductions = 0, totalNet = 0;
     for (const r of payrollRows) {
       const c = getCalcs(r);
@@ -185,15 +190,19 @@ export default function PayrollEngine() {
       totalNet += c.netPayable;
     }
     return { totalBase, totalOT, totalDeductions, totalNet };
-  }, [payrollRows]);
+  }, [monthlyPayrollSummary, payrollRows]);
 
   const approvePayroll = async () => {
     setIsSavingPayroll(true);
     try {
-      const ledger = await savePayrollLedger(selectedMonthYear);
-      const employees = employeeRecords.length ? employeeRecords : await listEmployees();
+      const ledger = await lockPayrollLedger(selectedMonthYear);
+      const [employees, summary] = await Promise.all([
+        employeeRecords.length ? Promise.resolve(employeeRecords) : listEmployees(),
+        readMonthlyPayrollSummary(selectedMonthYear),
+      ]);
       setEmployeeRecords(employees);
       setPayrollRows(ledger.items.map((line) => mapPayrollLineToRow(line, employees)));
+      setMonthlyPayrollSummary(summary);
       toast.success("Payroll ledger locked", {
         description: `${format(selectedMonth, "MMMM yyyy")} payslips are ready.`,
       });

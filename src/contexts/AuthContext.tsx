@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, useCallback, type React
 import {
   clearStoredAuthToken,
   getCurrentUser,
+  getStoredAuthToken,
   loginWithPassword,
   type ApiAuthUser,
 } from "@/lib/api";
@@ -17,18 +18,12 @@ interface AuthUser {
 interface AuthContextValue {
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<void>;
-  loginAsPrototype: (role: AppRole) => void;
   logout: () => void;
   isAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 const AUTH_USER_KEY = "payroll_auth_user";
-
-const MOCK_USERS: Record<AppRole, AuthUser> = {
-  admin: { id: "u1", name: "Admin User", role: "admin" },
-  operator: { id: "u2", name: "Front Desk", role: "operator" },
-};
 
 function readStoredUser(): AuthUser | null {
   try {
@@ -60,6 +55,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
+    const token = getStoredAuthToken();
+
+    if (!token) {
+      clearStoredUser();
+      setUser(null);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     getCurrentUser()
       .then((apiUser) => {
@@ -85,13 +89,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     storeUser(apiUser);
   }, []);
 
-  const loginAsPrototype = useCallback((role: AppRole) => {
-    const prototypeUser = MOCK_USERS[role];
-    clearStoredAuthToken();
-    setUser(prototypeUser);
-    storeUser(prototypeUser);
-  }, []);
-
   const logout = useCallback(() => {
     clearStoredAuthToken();
     clearStoredUser();
@@ -99,7 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, login, loginAsPrototype, logout, isAdmin: user?.role === "admin" }}>
+    <AuthContext.Provider value={{ user, login, logout, isAdmin: user?.role === "admin" }}>
       {children}
     </AuthContext.Provider>
   );

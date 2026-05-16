@@ -1,4 +1,3 @@
-// TODO [BACKEND]: Holiday calendar → fetch("/api/settings/holidays") GET/POST/DELETE
 import { useEffect, useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,12 +27,6 @@ interface Holiday {
   name: string;
 }
 
-const INITIAL_HOLIDAYS: Holiday[] = [
-  { id: "h1", date: new Date(2026, 7, 15), name: "Independence Day" },
-  { id: "h2", date: new Date(2026, 10, 12), name: "Diwali" },
-  { id: "h3", date: new Date(2026, 0, 26), name: "Republic Day" },
-];
-
 interface CompanySettingsProps {
   designations: string[];
   setDesignations: React.Dispatch<React.SetStateAction<string[]>>;
@@ -59,14 +52,14 @@ export default function CompanySettings({
   const [unusedLeaveAction, setUnusedLeaveAction] = useState("carry_forward");
 
   // Holiday Calendar
-  const [holidays, setHolidays] = useState<Holiday[]>(INITIAL_HOLIDAYS);
+  const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [holidayDate, setHolidayDate] = useState<Date>();
   const [holidayName, setHolidayName] = useState("");
   const [datePickerOpen, setDatePickerOpen] = useState(false);
 
   // Branding
-  const [companyName, setCompanyName] = useState("PrintWorks Pvt. Ltd.");
-  const [companyAddress, setCompanyAddress] = useState("42 Industrial Area, Sector 7\nNew Delhi — 110020");
+  const [companyName, setCompanyName] = useState("");
+  const [companyAddress, setCompanyAddress] = useState("");
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [isSavingTimings, setIsSavingTimings] = useState(false);
   const [isSavingBranding, setIsSavingBranding] = useState(false);

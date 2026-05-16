@@ -25,20 +25,15 @@ interface SystemUser {
   role: "Admin" | "Operator";
 }
 
-const INITIAL_USERS: SystemUser[] = [
-  { id: "su1", name: "Admin User", userId: "admin@printworks.com", role: "Admin" },
-  { id: "su2", name: "Front Desk", userId: "frontdesk", role: "Operator" },
-];
-
 export default function Settings() {
   // Branding
-  const [companyName, setCompanyName] = useState("PrintWorks Pvt. Ltd.");
-  const [companyAddress, setCompanyAddress] = useState("42 Industrial Area, Sector 7\nNew Delhi — 110020");
+  const [companyName, setCompanyName] = useState("");
+  const [companyAddress, setCompanyAddress] = useState("");
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [isSavingBranding, setIsSavingBranding] = useState(false);
 
   // User management
-  const [users, setUsers] = useState<SystemUser[]>(INITIAL_USERS);
+  const [users, setUsers] = useState<SystemUser[]>([]);
   const [newName, setNewName] = useState("");
   const [newUserId, setNewUserId] = useState("");
   const [newRole, setNewRole] = useState<"Admin" | "Operator">("Operator");
