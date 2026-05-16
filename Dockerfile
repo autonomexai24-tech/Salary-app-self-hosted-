@@ -4,7 +4,7 @@ FROM node:20-alpine AS frontend-build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install
 
 COPY . .
 ENV VITE_API_BASE_URL=""
