@@ -1,28 +1,24 @@
 from __future__ import annotations
 
 import uuid
-import logging
 from datetime import date as date_type
-from email.parser import BytesParser
-from email.policy import default as email_policy
-from io import BytesIO
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from reportlab.lib.utils import ImageReader
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 try:
-    from .database import get_db, get_settings
+    from .database import get_db
     from .models import CompanyHoliday, CompanySettings, Department, Designation, User, utc_now
     from .schemas import (
         CatalogCreate,
         CatalogList,
         CatalogRead,
         CatalogUpdate,
+        CompanyProfileRead,
+        CompanyProfileUpdate,
         CompanySettingsRead,
         CompanySettingsUpdate,
         HolidayCreate,
@@ -33,14 +29,26 @@ try:
         LeavePolicyUpdate,
     )
     from .security import get_current_admin_user, get_current_user
+    from .services.company_settings_service import (
+        DEFAULT_COMPANY_NAME,
+        build_logo_url,
+        clear_company_logo,
+        get_company_profile,
+        parse_multipart_upload,
+        profile_payload,
+        save_company_logo,
+        update_company_profile,
+    )
 except ImportError:
-    from database import get_db, get_settings
+    from database import get_db
     from models import CompanyHoliday, CompanySettings, Department, Designation, User, utc_now
     from schemas import (
         CatalogCreate,
         CatalogList,
         CatalogRead,
         CatalogUpdate,
+        CompanyProfileRead,
+        CompanyProfileUpdate,
         CompanySettingsRead,
         CompanySettingsUpdate,
         HolidayCreate,
@@ -51,14 +59,21 @@ except ImportError:
         LeavePolicyUpdate,
     )
     from security import get_current_admin_user, get_current_user
+    from services.company_settings_service import (
+        DEFAULT_COMPANY_NAME,
+        build_logo_url,
+        clear_company_logo,
+        get_company_profile,
+        parse_multipart_upload,
+        profile_payload,
+        save_company_logo,
+        update_company_profile,
+    )
 
-
-COMPANY_SETTINGS_ID = 1
-DEFAULT_COMPANY_NAME = "Your Company"
-BRANDING_FIELDS = {"company_name", "address", "phone", "email", "tax_id"}
-logger = logging.getLogger(__name__)
+BRANDING_FIELDS = {"company_name", "address", "phone", "phone_number", "registered_address"}
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+company_router = APIRouter(prefix="/company", tags=["company"])
 company_settings_alias_router = APIRouter(prefix="/company-settings", tags=["company-settings"])
 
 
@@ -71,45 +86,17 @@ def normalized_catalog_name(value: str) -> str:
 
 
 def get_or_create_company_settings(db: Session) -> CompanySettings:
-    settings_record = db.get(CompanySettings, COMPANY_SETTINGS_ID)
-    if settings_record is not None:
-        return settings_record
-
-    settings_record = CompanySettings(
-        id=COMPANY_SETTINGS_ID,
-        company_name=DEFAULT_COMPANY_NAME,
-    )
-    db.add(settings_record)
-
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        settings_record = db.get(CompanySettings, COMPANY_SETTINGS_ID)
-        if settings_record is None:
-            raise
-    else:
-        db.refresh(settings_record)
-
-    return settings_record
-
-
-def logo_url(logo_path: str | None) -> str | None:
-    if not logo_path:
-        return None
-    return f"{get_settings().normalized_upload_url_path}/{logo_path}"
-
-
-def upload_root() -> Path:
-    return get_settings().resolved_upload_dir
+    return get_company_profile(db)
 
 
 def settings_response(settings_record: CompanySettings) -> CompanySettingsRead:
     return CompanySettingsRead(
         id=settings_record.id,
-        company_name=settings_record.company_name,
+        company_name=settings_record.company_name or DEFAULT_COMPANY_NAME,
         address=settings_record.address,
         phone=settings_record.phone,
+        registered_address=settings_record.address,
+        phone_number=settings_record.phone,
         email=settings_record.email,
         tax_id=settings_record.tax_id,
         timezone=settings_record.timezone,
@@ -127,7 +114,7 @@ def settings_response(settings_record: CompanySettings) -> CompanySettingsRead:
         unused_leave_action=settings_record.unused_leave_action,
         default_leave_balance=settings_record.default_leave_balance,
         late_penalty_per_minute=settings_record.late_penalty_per_minute,
-        logo_url=logo_url(settings_record.logo_path),
+        logo_url=build_logo_url(settings_record.logo_path),
         logo_content_type=settings_record.logo_content_type,
         logo_updated_at=settings_record.logo_updated_at,
         created_at=settings_record.created_at,
@@ -173,126 +160,47 @@ def holiday_response(record: CompanyHoliday) -> HolidayRead:
     )
 
 
-def detect_logo_format(content: bytes) -> tuple[str, str] | None:
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", ".png"
-    if content.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", ".jpg"
-    return None
+def company_profile_response(settings_record: CompanySettings) -> CompanyProfileRead:
+    return CompanyProfileRead(**profile_payload(settings_record))
 
 
-def ensure_logo_pdf_renderable(content: bytes) -> None:
-    try:
-        image = ImageReader(BytesIO(content))
-        image.getSize()
-        image.getRGBData()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_detail(
-                "unsupported_logo_type",
-                "Logo file could not be decoded for PDF rendering",
-            ),
-        ) from exc
+@company_router.get("/settings", response_model=CompanyProfileRead, summary="Read canonical company profile")
+def read_company_profile(
+    db: Annotated[Session, Depends(get_db)],
+) -> CompanyProfileRead:
+    return company_profile_response(get_company_profile(db))
 
 
-def extract_multipart_file(content_type: str | None, body: bytes) -> bytes:
-    if not content_type or "multipart/form-data" not in content_type.lower():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_detail("invalid_logo_upload", "Logo upload must use multipart form data"),
+@company_router.put("/settings", response_model=CompanyProfileRead, summary="Update canonical company profile")
+async def update_company_profile_endpoint(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> CompanyProfileRead:
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type.lower():
+        parsed = parse_multipart_upload(content_type, await request.body())
+        profile = update_company_profile(
+            db,
+            parsed.fields,
+            logo_content=parsed.file_content,
+            logo_filename=parsed.filename,
+            logo_content_type=parsed.content_type,
         )
+        return company_profile_response(profile)
 
-    message = BytesParser(policy=email_policy).parsebytes(
-        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
-    )
-    if not message.is_multipart():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_detail("invalid_logo_upload", "Logo upload was not a valid multipart request"),
-        )
-
-    for part in message.iter_parts():
-        if part.get_param("name", header="content-disposition") != "file":
-            continue
-        payload = part.get_payload(decode=True)
-        if payload is None:
-            return b""
-        return payload
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=error_detail("missing_logo_file", "Logo upload must include a file field"),
-    )
-
-
-def logo_directory() -> Path:
-    directory = upload_root() / "logos"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def resolve_upload_path(relative_path: str) -> Path | None:
-    upload_dir = upload_root()
-    candidate = (upload_dir / relative_path).resolve()
     try:
-        candidate.relative_to(upload_dir)
-    except ValueError:
-        return None
-    return candidate
-
-
-def remove_logo_file(relative_path: str | None) -> None:
-    if not relative_path:
-        return
-
-    logo_path = resolve_upload_path(relative_path)
-    if logo_path is not None and logo_path.is_file():
-        try:
-            logo_path.unlink()
-        except OSError as exc:
-            logger.warning("Could not remove old logo file %s: %s", logo_path, exc)
-
-
-def remove_old_logo_variants(keep_path: Path) -> None:
-    for candidate in logo_directory().glob("company-logo.*"):
-        if candidate != keep_path and candidate.is_file():
-            try:
-                candidate.unlink()
-            except OSError as exc:
-                logger.warning("Could not remove old logo variant %s: %s", candidate, exc)
-
-
-def write_bytes_atomically(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temp_path.write_bytes(content)
-        temp_path.replace(path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
-
-def refresh_branding_artifacts(db: Session, settings_record: CompanySettings) -> None:
-    try:
-        try:
-            from .payroll import refresh_payslip_artifacts_for_branding_change
-        except ImportError:
-            from payroll import refresh_payslip_artifacts_for_branding_change
-
-        refresh_payslip_artifacts_for_branding_change(db, settings_record)
+        payload = CompanyProfileUpdate.model_validate(await request.json())
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Failed to refresh payslip artifacts after branding change", exc_info=exc)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=error_detail(
-                "pdf_branding_render_failed",
-                "PDF branding render failed while refreshing existing payslips",
-            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=error_detail("validation_error", "Company profile payload is invalid"),
         ) from exc
+
+    profile = update_company_profile(db, payload.model_dump(exclude_unset=True))
+    return company_profile_response(profile)
 
 
 @router.get("/", response_model=CompanySettingsRead, summary="Read company settings", include_in_schema=False)
@@ -312,13 +220,9 @@ def update_company_settings(
 ) -> CompanySettingsRead:
     settings_record = get_or_create_company_settings(db)
     changes = payload.model_dump(exclude_unset=True)
-    branding_changed = any(
-        field in BRANDING_FIELDS and getattr(settings_record, field) != value
-        for field, value in changes.items()
-    )
-    for field, value in changes.items():
-        setattr(settings_record, field, value)
-    if settings_record.shift_end_time <= settings_record.shift_start_time:
+    next_shift_start = changes.get("shift_start_time", settings_record.shift_start_time)
+    next_shift_end = changes.get("shift_end_time", settings_record.shift_end_time)
+    if next_shift_end <= next_shift_start:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_detail(
@@ -327,11 +231,18 @@ def update_company_settings(
             ),
         )
 
-    settings_record.updated_at = utc_now()
-    db.commit()
-    db.refresh(settings_record)
-    if branding_changed:
-        refresh_branding_artifacts(db, settings_record)
+    branding_changes = {field: value for field, value in changes.items() if field in BRANDING_FIELDS}
+    if branding_changes:
+        settings_record = update_company_profile(db, branding_changes)
+
+    for field, value in changes.items():
+        if field in BRANDING_FIELDS:
+            continue
+        setattr(settings_record, field, value)
+
+    if any(field not in BRANDING_FIELDS for field in changes):
+        settings_record.updated_at = utc_now()
+        db.commit()
         db.refresh(settings_record)
     return settings_response(settings_record)
 
@@ -382,61 +293,21 @@ async def upload_company_logo(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
 ) -> CompanySettingsRead:
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            if int(content_length) > get_settings().max_logo_upload_bytes + 65536:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=error_detail("logo_too_large", "Logo file exceeds the configured size limit"),
-                )
-        except ValueError:
-            pass
-
-    content = extract_multipart_file(
+    parsed = parse_multipart_upload(
         request.headers.get("content-type"),
         await request.body(),
     )
-    if not content:
+    if parsed.file_content is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_detail("empty_logo", "Logo file cannot be empty"),
+            detail=error_detail("missing_logo_file", "Logo upload must include a file field"),
         )
-    if len(content) > get_settings().max_logo_upload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=error_detail("logo_too_large", "Logo file exceeds the configured size limit"),
-        )
-
-    logo_format = detect_logo_format(content)
-    if logo_format is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_detail(
-                "unsupported_logo_type",
-                "Logo must be a PNG or JPEG image so it can be embedded in generated PDFs",
-            ),
-        )
-
-    content_type, extension = logo_format
-    ensure_logo_pdf_renderable(content)
-    settings_record = get_or_create_company_settings(db)
-    destination = logo_directory() / f"company-logo{extension}"
-    write_bytes_atomically(destination, content)
-    new_logo_path = destination.resolve().relative_to(upload_root()).as_posix()
-    if settings_record.logo_path != new_logo_path:
-        remove_logo_file(settings_record.logo_path)
-    remove_old_logo_variants(destination)
-
-    settings_record.logo_path = new_logo_path
-    settings_record.logo_content_type = content_type
-    settings_record.logo_updated_at = utc_now()
-    settings_record.updated_at = settings_record.logo_updated_at
-    db.commit()
-    db.refresh(settings_record)
-    refresh_branding_artifacts(db, settings_record)
-    db.refresh(settings_record)
-
+    settings_record = save_company_logo(
+        db,
+        content=parsed.file_content,
+        filename=parsed.filename,
+        content_type=parsed.content_type,
+    )
     return settings_response(settings_record)
 
 
@@ -871,36 +742,7 @@ def delete_company_logo(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
 ) -> CompanySettingsRead:
-    settings_record = get_or_create_company_settings(db)
-    remove_logo_file(settings_record.logo_path)
-    settings_record.logo_path = None
-    settings_record.logo_content_type = None
-    settings_record.logo_updated_at = None
-    settings_record.updated_at = utc_now()
-    db.commit()
-    db.refresh(settings_record)
-    refresh_branding_artifacts(db, settings_record)
-    db.refresh(settings_record)
-
-    return settings_response(settings_record)
-
-
-@company_settings_alias_router.get("", response_model=CompanySettingsRead, summary="Read company settings")
-@company_settings_alias_router.get("/", response_model=CompanySettingsRead, summary="Read company settings", include_in_schema=False)
-def read_company_settings_alias(
-    db: Annotated[Session, Depends(get_db)],
-) -> CompanySettingsRead:
-    return read_company_settings(db=db)
-
-
-@company_settings_alias_router.put("", response_model=CompanySettingsRead, summary="Update company settings")
-@company_settings_alias_router.put("/", response_model=CompanySettingsRead, summary="Update company settings", include_in_schema=False)
-def update_company_settings_alias(
-    payload: CompanySettingsUpdate,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_admin_user)],
-) -> CompanySettingsRead:
-    return update_company_settings(payload=payload, db=db, _=current_user)
+    return settings_response(clear_company_logo(db))
 
 
 @company_settings_alias_router.get(
@@ -926,20 +768,3 @@ def update_leave_policy_alias(
     current_user: Annotated[User, Depends(get_current_admin_user)],
 ) -> LeavePolicyRead:
     return update_leave_policy(payload=payload, db=db, _=current_user)
-
-
-@company_settings_alias_router.post("/logo", response_model=CompanySettingsRead, summary="Upload company logo")
-async def upload_company_logo_alias(
-    request: Request,
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_admin_user)],
-) -> CompanySettingsRead:
-    return await upload_company_logo(request=request, db=db, _=current_user)
-
-
-@company_settings_alias_router.delete("/logo", response_model=CompanySettingsRead, summary="Remove company logo")
-def delete_company_logo_alias(
-    db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_admin_user)],
-) -> CompanySettingsRead:
-    return delete_company_logo(db=db, _=current_user)

@@ -21,8 +21,10 @@ from reportlab.platypus import (
 
 try:
     from ..models import CompanySettings, PayrollLedger
+    from ..services.company_settings_service import DEFAULT_COMPANY_NAME, company_contact_lines, logo_file_path
 except ImportError:
     from models import CompanySettings, PayrollLedger
+    from services.company_settings_service import DEFAULT_COMPANY_NAME, company_contact_lines, logo_file_path
 
 
 def money_text(value: Decimal | int | str) -> str:
@@ -47,54 +49,22 @@ def safe_text(value: object | None) -> str:
     return escape(str(value))
 
 
-def resolve_logo_path(
-    company_settings: CompanySettings,
-    *,
-    upload_dir: Path,
-) -> Path | None:
-    if not company_settings.logo_path:
-        return None
-
-    upload_root = upload_dir.resolve()
-    candidate = (upload_root / company_settings.logo_path).resolve()
-    try:
-        candidate.relative_to(upload_root)
-    except ValueError:
-        raise ValueError("Configured company logo path is outside the upload directory")
-
-    if not candidate.is_file():
-        raise FileNotFoundError(f"Configured company logo is missing: {candidate}")
-    return candidate
-
-
 def logo_image(
     company_settings: CompanySettings,
     *,
     upload_dir: Path,
 ) -> Image | None:
-    logo_path = resolve_logo_path(company_settings, upload_dir=upload_dir)
-    if logo_path is None:
+    del upload_dir
+    resolved_logo_path = logo_file_path(company_settings)
+    if resolved_logo_path is None:
         return None
 
     try:
-        image = Image(str(logo_path))
+        image = Image(str(resolved_logo_path))
         image._restrictSize(35 * mm, 22 * mm)
         return image
-    except Exception as exc:
-        raise RuntimeError(f"Configured company logo could not be rendered: {logo_path}") from exc
-
-
-def company_contact_lines(company_settings: CompanySettings) -> list[str]:
-    return [
-        line
-        for line in [
-            company_settings.address,
-            company_settings.phone,
-            company_settings.email,
-            company_settings.tax_id,
-        ]
-        if line
-    ]
+    except Exception:
+        return None
 
 
 def build_payslip_pdf(
@@ -154,7 +124,7 @@ def build_payslip_pdf(
     )
 
     logo = logo_image(company_settings, upload_dir=upload_dir)
-    company_name = safe_text(company_settings.company_name or "Your Company")
+    company_name = safe_text(company_settings.company_name or DEFAULT_COMPANY_NAME)
     company_lines = [Paragraph(f"<b>{company_name}</b>", title_style)]
     company_lines.extend(
         Paragraph(safe_text(line), muted_style)

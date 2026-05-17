@@ -3,17 +3,14 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Building2, ImageIcon, Save, ShieldCheck, Plus, UserX } from "lucide-react";
+import { ShieldCheck, Plus, UserX } from "lucide-react";
 import {
-  ApiError,
   apiErrorMessage,
   createUser,
   listUsers,
 } from "@/lib/api";
-import { logBrandingAssetMissing, useBranding } from "@/contexts/BrandingContext";
 import { toast } from "sonner";
 
 interface SystemUser {
@@ -23,47 +20,13 @@ interface SystemUser {
   role: "Admin" | "Operator";
 }
 
-function brandingErrorDescription(error: unknown): string {
-  if (error instanceof ApiError && ["network_error", "request_timeout"].includes(error.code ?? "")) {
-    return "Backend unavailable";
-  }
-  return apiErrorMessage(error);
-}
-
 export default function Settings() {
-  const {
-    settings: brandingSettings,
-    logoUrl,
-    errorMessage: brandingLoadError,
-    saveBranding: saveCentralBranding,
-    uploadLogo,
-  } = useBranding();
-
-  // Branding
-  const [companyName, setCompanyName] = useState("");
-  const [companyAddress, setCompanyAddress] = useState("");
-  const [localLogoPreview, setLocalLogoPreview] = useState<string | null>(null);
-  const [isSavingBranding, setIsSavingBranding] = useState(false);
-
   // User management
   const [users, setUsers] = useState<SystemUser[]>([]);
   const [newName, setNewName] = useState("");
   const [newUserId, setNewUserId] = useState("");
   const [newRole, setNewRole] = useState<"Admin" | "Operator">("Operator");
   const [newPassword, setNewPassword] = useState("");
-
-  useEffect(() => {
-    if (!brandingSettings) return;
-    setCompanyName(brandingSettings.company_name);
-    setCompanyAddress(brandingSettings.address ?? "");
-  }, [brandingSettings]);
-
-  useEffect(() => {
-    if (!brandingLoadError || brandingSettings) return;
-    toast.error("Backend unavailable", {
-      description: brandingLoadError,
-    });
-  }, [brandingLoadError, brandingSettings]);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,52 +52,6 @@ export default function Settings() {
       cancelled = true;
     };
   }, []);
-
-  const saveBranding = async () => {
-    const normalizedName = companyName.trim();
-    if (!normalizedName) {
-      toast.error("Branding save failed", {
-        description: "Registered company name is required.",
-      });
-      return;
-    }
-
-    setIsSavingBranding(true);
-    try {
-      const settings = await saveCentralBranding({
-        company_name: normalizedName,
-        address: companyAddress.trim() || null,
-      });
-      setCompanyName(settings.company_name);
-      setCompanyAddress(settings.address ?? "");
-      toast.success("Company branding saved");
-    } catch (error) {
-      toast.error("Branding save failed", {
-        description: brandingErrorDescription(error),
-      });
-    } finally {
-      setIsSavingBranding(false);
-    }
-  };
-
-  const handleLogoFile = async (file: File) => {
-    const localPreviewUrl = URL.createObjectURL(file);
-    setLocalLogoPreview(localPreviewUrl);
-    try {
-      await uploadLogo(file);
-      setLocalLogoPreview(null);
-      toast.success("Company logo uploaded");
-    } catch (error) {
-      setLocalLogoPreview(null);
-      toast.error("Logo upload failed", {
-        description: brandingErrorDescription(error),
-      });
-    } finally {
-      URL.revokeObjectURL(localPreviewUrl);
-    }
-  };
-
-  const logoPreview = localLogoPreview ?? logoUrl;
 
   const addUser = async () => {
     if (!newName.trim() || !newUserId.trim() || !newPassword) return;
@@ -173,51 +90,8 @@ export default function Settings() {
         <p className="text-sm text-muted-foreground mt-1">Global application configuration and user management.</p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Card A: Company Branding */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Building2 className="h-4 w-4 text-primary" />
-              Company Branding
-            </CardTitle>
-            <CardDescription>This logo will appear on the Login Screen and all generated Payslips.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-1.5">
-              <Label className="text-xs">Registered Company Name</Label>
-              <Input value={companyName} onChange={(e) => setCompanyName(e.target.value)} className="h-9 text-sm" />
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Registered Address</Label>
-              <Textarea value={companyAddress} onChange={(e) => setCompanyAddress(e.target.value)} className="text-sm min-h-[72px] resize-none" />
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Company Logo</Label>
-              <label className="flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-muted-foreground/25 bg-muted/30 p-6 cursor-pointer hover:border-primary/40 hover:bg-primary/5 transition-colors">
-                {logoPreview ? (
-                  <img src={logoPreview} alt="Company logo" className="max-h-16 max-w-[200px] object-contain" onError={() => logBrandingAssetMissing(logoPreview)} />
-                ) : (
-                  <>
-                    <ImageIcon className="h-8 w-8 text-muted-foreground/50" />
-                    <p className="text-xs font-medium text-muted-foreground">Click or Drag to Upload Logo</p>
-                    <p className="text-[10px] text-muted-foreground/70">Recommended: 250×100px (PNG / JPG)</p>
-                  </>
-                )}
-                <input type="file" accept="image/png,image/jpeg" className="hidden" onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) handleLogoFile(file);
-                }} />
-              </label>
-            </div>
-            <Button className="w-full mt-2" size="sm" onClick={saveBranding} disabled={isSavingBranding}>
-              <Save className="h-3.5 w-3.5 mr-1.5" />
-              Save Branding
-            </Button>
-          </CardContent>
-        </Card>
-
-        {/* Card B: User Management */}
+      <div className="grid grid-cols-1 gap-6">
+        {/* Card A: User Management */}
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">

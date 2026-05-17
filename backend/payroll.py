@@ -30,6 +30,7 @@ try:
         SalaryAdvanceRead,
     )
     from .security import get_current_admin_user
+    from .services.company_settings_service import branding_timestamp, get_company_profile
     from .utils.payroll_helpers import (
         PayrollEmployee,
         PayrollLog,
@@ -57,6 +58,7 @@ except ImportError:
         SalaryAdvanceRead,
     )
     from security import get_current_admin_user
+    from services.company_settings_service import branding_timestamp, get_company_profile
     from utils.payroll_helpers import (
         PayrollEmployee,
         PayrollLog,
@@ -74,8 +76,6 @@ except ImportError:
 router = APIRouter(prefix="/payroll", tags=["payroll"])
 receipts_router = APIRouter(prefix="/receipts", tags=["receipts"])
 payslips_router = APIRouter(prefix="/payslips", tags=["payslips"])
-COMPANY_SETTINGS_ID = 1
-DEFAULT_COMPANY_NAME = "Your Company"
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 PAYSLIP_UPLOAD_DIRNAME = "payslips"
 logger = logging.getLogger(__name__)
@@ -221,16 +221,7 @@ def load_payroll_employees(
 
 
 def get_company_settings_for_payroll(db: Session) -> CompanySettings:
-    settings_record = db.get(CompanySettings, COMPANY_SETTINGS_ID)
-    if settings_record is not None:
-        return settings_record
-
-    return CompanySettings(
-        id=COMPANY_SETTINGS_ID,
-        company_name=DEFAULT_COMPANY_NAME,
-        overtime_multiplier=Decimal("1.00"),
-        late_penalty_per_minute=Decimal("0.00"),
-    )
+    return get_company_profile(db)
 
 
 def month_index(month_year: str) -> tuple[int, int]:
@@ -449,14 +440,7 @@ def get_ledger_row_for_employee(
 
 
 def get_company_settings_for_payslip(db: Session) -> CompanySettings:
-    settings_record = db.get(CompanySettings, COMPANY_SETTINGS_ID)
-    if settings_record is not None:
-        return settings_record
-
-    return CompanySettings(
-        id=COMPANY_SETTINGS_ID,
-        company_name=DEFAULT_COMPANY_NAME,
-    )
+    return get_company_profile(db)
 
 
 def payslip_filename(row: PayrollLedger) -> str:
@@ -546,14 +530,7 @@ def branding_updated_after_pdf(
     if generated_at is None:
         return True
 
-    branding_dates = [
-        normalized_utc(company_settings.updated_at),
-        normalized_utc(company_settings.logo_updated_at),
-    ]
-    latest_branding_update = max(
-        (value for value in branding_dates if value is not None),
-        default=None,
-    )
+    latest_branding_update = normalized_utc(branding_timestamp(company_settings))
     return latest_branding_update is not None and latest_branding_update > generated_at
 
 

@@ -153,9 +153,19 @@ class TokenPayload(BaseModel):
 
 
 class CompanySettingsUpdate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     company_name: str | None = Field(default=None, min_length=1, max_length=160)
-    address: str | None = Field(default=None, max_length=1000)
-    phone: str | None = Field(default=None, max_length=40)
+    address: str | None = Field(
+        default=None,
+        max_length=1000,
+        validation_alias=AliasChoices("address", "registered_address"),
+    )
+    phone: str | None = Field(
+        default=None,
+        max_length=40,
+        validation_alias=AliasChoices("phone", "phone_number"),
+    )
     email: str | None = Field(default=None, max_length=254)
     tax_id: str | None = Field(default=None, max_length=64)
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
@@ -319,6 +329,8 @@ class CompanySettingsRead(BaseModel):
     company_name: str
     address: str | None = None
     phone: str | None = None
+    registered_address: str | None = None
+    phone_number: str | None = None
     email: str | None = None
     tax_id: str | None = None
     timezone: str
@@ -336,6 +348,50 @@ class CompanySettingsRead(BaseModel):
     unused_leave_action: str
     default_leave_balance: Decimal
     late_penalty_per_minute: Decimal
+    logo_url: str | None = None
+    logo_content_type: str | None = None
+    logo_updated_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompanyProfileUpdate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    company_name: str | None = Field(default=None, min_length=1, max_length=160)
+    phone_number: str | None = Field(
+        default=None,
+        max_length=40,
+        validation_alias=AliasChoices("phone_number", "phone"),
+    )
+    registered_address: str | None = Field(
+        default=None,
+        max_length=1000,
+        validation_alias=AliasChoices("registered_address", "address"),
+    )
+
+    @field_validator("company_name")
+    @classmethod
+    def validate_profile_company_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        company_name = normalize_optional_text(value, collapse_whitespace=True)
+        if company_name is None:
+            raise ValueError("Company name is required")
+        return company_name
+
+    @field_validator("phone_number", "registered_address")
+    @classmethod
+    def validate_profile_optional_text(cls, value: str | None) -> str | None:
+        return normalize_optional_text(value)
+
+
+class CompanyProfileRead(BaseModel):
+    id: int
+    company_name: str = "Your Company"
+    phone_number: str | None = None
+    registered_address: str | None = None
+    logo_path: str | None = None
     logo_url: str | None = None
     logo_content_type: str | None = None
     logo_updated_at: datetime | None = None

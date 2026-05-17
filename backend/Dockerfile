@@ -12,7 +12,7 @@ COPY requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY . ./backend
-RUN mkdir -p /app/backend/uploads/logos /app/backend/uploads/payslips
+RUN mkdir -p /app/backend/uploads/company /app/backend/uploads/payslips
 
 EXPOSE 8000
 CMD ["sh", "-c", "python -m backend.startup && uvicorn backend.main:app --host 0.0.0.0 --port 8000 --proxy-headers"]

@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 try:
     from .attendance import router as attendance_router
-    from .company_settings import company_settings_alias_router, router as company_settings_router
+    from .company_settings import company_router, company_settings_alias_router, router as company_settings_router
     from .dashboard import router as dashboard_router
     from .database import UploadStorageError, get_db, get_settings, validate_upload_storage
     from .employees import router as employees_router
@@ -22,7 +22,7 @@ try:
     from .users import auth_router, router as users_router
 except ImportError:
     from attendance import router as attendance_router
-    from company_settings import company_settings_alias_router, router as company_settings_router
+    from company_settings import company_router, company_settings_alias_router, router as company_settings_router
     from dashboard import router as dashboard_router
     from database import UploadStorageError, get_db, get_settings, validate_upload_storage
     from employees import router as employees_router
@@ -61,6 +61,7 @@ app.mount(
 )
 app.include_router(auth_router, prefix=API_PREFIX)
 app.include_router(users_router, prefix=API_PREFIX)
+app.include_router(company_router, prefix=API_PREFIX)
 app.include_router(company_settings_router, prefix=API_PREFIX)
 app.include_router(company_settings_alias_router, prefix=API_PREFIX)
 app.include_router(employees_router, prefix=API_PREFIX)

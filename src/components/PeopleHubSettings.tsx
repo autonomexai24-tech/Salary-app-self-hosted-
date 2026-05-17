@@ -2,12 +2,13 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Plus, X, Clock, Save, CalendarDays, Palmtree } from "lucide-react";
+import { Plus, X, Clock, Save, CalendarDays, Palmtree, Building2, ImageIcon, Loader2 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { COMPANY_FIXED_SHIFT, GRACE_PERIOD_MINUTES } from "@/lib/payroll-config";
@@ -31,6 +32,7 @@ import {
 } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
+import { logBrandingAssetMissing, useBranding } from "@/contexts/BrandingContext";
 
 interface Holiday {
   id: string;
@@ -69,6 +71,34 @@ const OFFLINE_STORAGE_KEYS = {
   timings: "payroll_offline_timings",
   leavePolicy: "payroll_offline_leave_policy",
 } as const;
+
+const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+const ALLOWED_LOGO_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
+const PHONE_PATTERN = /^\+?[0-9][0-9().-]{5,24}$/;
+
+function sanitizePhoneNumber(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+function validateCompanyDetails(companyName: string, phoneNumber: string): string | null {
+  if (companyName.trim().length < 2) {
+    return "Company name must be at least 2 characters.";
+  }
+  if (phoneNumber && !PHONE_PATTERN.test(phoneNumber)) {
+    return "Phone number can include an international prefix, digits, parentheses, dots, and hyphens.";
+  }
+  return null;
+}
+
+function validateLogoFile(file: File): string | null {
+  if (!ALLOWED_LOGO_TYPES.has(file.type.toLowerCase())) {
+    return "Logo must be a PNG, JPG, JPEG, or WEBP image.";
+  }
+  if (file.size > MAX_LOGO_BYTES) {
+    return "Logo file must be 2MB or smaller.";
+  }
+  return null;
+}
 
 function readOfflineJson<T>(key: string, fallback: T): T {
   try {
@@ -116,6 +146,21 @@ export default function PeopleHubSettings({
   const [overtimeMultiplier, setOvertimeMultiplier] = useState("1");
   const [latePenaltyPerMinute, setLatePenaltyPerMinute] = useState("0");
 
+  // Company Details
+  const {
+    settings: brandingSettings,
+    logoUrl,
+    errorMessage: brandingLoadError,
+    saveBranding,
+    uploadLogo,
+  } = useBranding();
+  const [companyName, setCompanyName] = useState("");
+  const [companyPhone, setCompanyPhone] = useState("");
+  const [companyAddress, setCompanyAddress] = useState("");
+  const [localLogoPreview, setLocalLogoPreview] = useState<string | null>(null);
+  const [isSavingCompanyDetails, setIsSavingCompanyDetails] = useState(false);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+
   // Holiday Calendar
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [holidayDate, setHolidayDate] = useState<Date>();
@@ -132,6 +177,20 @@ export default function PeopleHubSettings({
 
   const { user } = useAuth();
   const isOffline = user?.id === "offline-admin";
+
+  useEffect(() => {
+    if (!brandingSettings) return;
+    setCompanyName(brandingSettings.company_name);
+    setCompanyPhone(brandingSettings.phone_number ?? "");
+    setCompanyAddress(brandingSettings.registered_address ?? "");
+  }, [brandingSettings]);
+
+  useEffect(() => {
+    if (!brandingLoadError || brandingSettings) return;
+    toast.error("Could not load company details", {
+      description: brandingLoadError,
+    });
+  }, [brandingLoadError, brandingSettings]);
 
   const syncDesignations = (records: BackendSettingsCatalogItem[]) => {
     setDesignationRecords(records);
@@ -401,6 +460,65 @@ export default function PeopleHubSettings({
     }
   };
 
+  const saveCompanyDetails = async () => {
+    const normalizedName = companyName.trim();
+    const normalizedPhone = sanitizePhoneNumber(companyPhone);
+    const validationMessage = validateCompanyDetails(normalizedName, normalizedPhone);
+
+    if (validationMessage) {
+      toast.error("Company details not saved", {
+        description: validationMessage,
+      });
+      return;
+    }
+
+    setIsSavingCompanyDetails(true);
+    try {
+      const profile = await saveBranding({
+        company_name: normalizedName,
+        phone_number: normalizedPhone || null,
+        registered_address: companyAddress.trim() || null,
+      });
+      setCompanyName(profile.company_name);
+      setCompanyPhone(profile.phone_number ?? "");
+      setCompanyAddress(profile.registered_address ?? "");
+      toast.success("Company details saved");
+    } catch (error) {
+      toast.error("Company details not saved", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsSavingCompanyDetails(false);
+    }
+  };
+
+  const uploadCompanyLogo = async (file: File) => {
+    const validationMessage = validateLogoFile(file);
+    if (validationMessage) {
+      toast.error("Logo upload rejected", {
+        description: validationMessage,
+      });
+      return;
+    }
+
+    const localPreviewUrl = URL.createObjectURL(file);
+    setLocalLogoPreview(localPreviewUrl);
+    setIsUploadingLogo(true);
+    try {
+      await uploadLogo(file);
+      setLocalLogoPreview(null);
+      toast.success("Company logo uploaded");
+    } catch (error) {
+      setLocalLogoPreview(null);
+      toast.error("Logo upload failed", {
+        description: apiErrorMessage(error),
+      });
+    } finally {
+      setIsUploadingLogo(false);
+      URL.revokeObjectURL(localPreviewUrl);
+    }
+  };
+
   const sortedHolidays = useMemo(
     () => [...holidays].sort((a, b) => a.date.getTime() - b.date.getTime()),
     [holidays]
@@ -472,11 +590,100 @@ export default function PeopleHubSettings({
     }
   };
 
+  const logoPreview = localLogoPreview ?? logoUrl;
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* ========== LEFT COLUMN ========== */}
       <div className="space-y-6">
-        {/* Card A: Shift & Timing Rules */}
+        {/* Card A: Company Details */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Building2 className="h-4 w-4 text-primary" />
+              Company Details
+            </CardTitle>
+            <CardDescription>Manage the company profile used across the app and generated documents.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Company Name</Label>
+                <Input
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  className="h-9 text-sm"
+                  maxLength={160}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Phone Number</Label>
+                <Input
+                  value={companyPhone}
+                  onChange={(e) => setCompanyPhone(e.target.value)}
+                  className="h-9 text-sm"
+                  maxLength={40}
+                  placeholder="+919000000000"
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Registered Address</Label>
+              <Textarea
+                value={companyAddress}
+                onChange={(e) => setCompanyAddress(e.target.value)}
+                className="text-sm min-h-[72px] resize-none"
+                maxLength={1000}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Company Logo</Label>
+              <label className="flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-muted-foreground/25 bg-muted/30 p-6 cursor-pointer hover:border-primary/40 hover:bg-primary/5 transition-colors">
+                {logoPreview ? (
+                  <img
+                    src={logoPreview}
+                    alt="Company logo"
+                    className="max-h-16 max-w-[200px] object-contain"
+                    onError={() => logBrandingAssetMissing(logoPreview)}
+                  />
+                ) : (
+                  <>
+                    <ImageIcon className="h-8 w-8 text-muted-foreground/50" />
+                    <p className="text-xs font-medium text-muted-foreground">Click or Drag to Upload Logo</p>
+                    <p className="text-[10px] text-muted-foreground/70">PNG, JPG, JPEG, or WEBP up to 2MB</p>
+                  </>
+                )}
+                {isUploadingLogo && (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Uploading
+                  </span>
+                )}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/jpg,image/webp"
+                  className="hidden"
+                  disabled={isUploadingLogo}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.currentTarget.value = "";
+                    if (file) void uploadCompanyLogo(file);
+                  }}
+                />
+              </label>
+            </div>
+            <Button className="w-full mt-2" size="sm" onClick={saveCompanyDetails} disabled={isSavingCompanyDetails}>
+              {isSavingCompanyDetails ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5 mr-1.5" />
+              )}
+              Save Company Details
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Card B: Shift & Timing Rules */}
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
@@ -514,7 +721,7 @@ export default function PeopleHubSettings({
           </CardContent>
         </Card>
 
-        {/* Card B: Global Leave Policy */}
+        {/* Card C: Global Leave Policy */}
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">

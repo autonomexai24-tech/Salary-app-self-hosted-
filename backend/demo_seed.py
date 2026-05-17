@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 try:
-    from .company_settings import COMPANY_SETTINGS_ID, normalized_catalog_name
+    from .company_settings import normalized_catalog_name
     from .database import get_session_factory, get_settings
     from .models import (
         AttendanceEntry,
@@ -31,9 +31,10 @@ try:
     )
     from .payroll import ensure_payslip_zip, get_ledger_rows, save_payroll_ledger_for_month
     from .rates import calculate_rates
+    from .services.company_settings_service import COMPANY_SETTINGS_ID, save_company_logo
     from .time_helpers import calculate_attendance, money, time_rules_from_settings
 except ImportError:
-    from company_settings import COMPANY_SETTINGS_ID, normalized_catalog_name
+    from company_settings import normalized_catalog_name
     from database import get_session_factory, get_settings
     from models import (
         AttendanceEntry,
@@ -50,6 +51,7 @@ except ImportError:
     )
     from payroll import ensure_payslip_zip, get_ledger_rows, save_payroll_ledger_for_month
     from rates import calculate_rates
+    from services.company_settings_service import COMPANY_SETTINGS_ID, save_company_logo
     from time_helpers import calculate_attendance, money, time_rules_from_settings
 
 
@@ -202,15 +204,6 @@ def build_demo_logo_png() -> bytes:
     )
 
 
-def write_demo_logo() -> str:
-    logo_dir = get_settings().resolved_upload_dir / "logos"
-    logo_dir.mkdir(parents=True, exist_ok=True)
-    logo_path = logo_dir / "printworks-demo-logo.png"
-    if not logo_path.exists():
-        logo_path.write_bytes(build_demo_logo_png())
-    return "logos/printworks-demo-logo.png"
-
-
 def upsert_catalog(db: Session, model: type[Department] | type[Designation], names: Iterable[str]) -> None:
     now = utc_now()
     for name in names:
@@ -252,11 +245,15 @@ def seed_company_settings(db: Session) -> CompanySettings:
     settings_record.unused_leave_action = "carry_forward"
     settings_record.default_leave_balance = Decimal("12.00")
     settings_record.late_penalty_per_minute = Decimal("0.00")
-    settings_record.logo_path = write_demo_logo()
-    settings_record.logo_content_type = "image/png"
-    settings_record.logo_updated_at = settings_record.logo_updated_at or utc_now()
     settings_record.updated_at = utc_now()
-    return settings_record
+    db.flush()
+    return save_company_logo(
+        db,
+        content=build_demo_logo_png(),
+        filename="printworks-demo-logo.png",
+        content_type="image/png",
+        refresh_artifacts=False,
+    )
 
 
 def seed_employees(db: Session) -> list[Employee]:

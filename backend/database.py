@@ -217,7 +217,7 @@ class Settings(BaseSettings):
 
     @property
     def public_logo_url_path(self) -> str:
-        return f"{self.normalized_upload_url_path}/logos"
+        return f"{self.normalized_upload_url_path}/company"
 
     @property
     def resolved_upload_dir(self) -> Path:
@@ -281,7 +281,7 @@ def validate_upload_storage(settings: Settings | None = None) -> Path:
     upload_dir = runtime_settings.resolved_upload_dir
     try:
         upload_dir.mkdir(parents=True, exist_ok=True)
-        (upload_dir / "logos").mkdir(parents=True, exist_ok=True)
+        (upload_dir / "company").mkdir(parents=True, exist_ok=True)
         (upload_dir / "payslips").mkdir(parents=True, exist_ok=True)
         probe_path = upload_dir / ".startup-write-check"
         probe_path.write_text("ok", encoding="utf-8")

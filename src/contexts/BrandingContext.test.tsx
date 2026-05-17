@@ -6,26 +6,10 @@ import { BrandingProvider, useBranding } from "./BrandingContext";
 const SETTINGS_RESPONSE = {
   id: 1,
   company_name: "Persistent Brand Pvt Ltd",
-  address: "123 Payroll Street\nMumbai",
-  phone: null,
-  email: null,
-  tax_id: null,
-  timezone: "Asia/Kolkata",
-  currency: "INR",
-  shift_start_time: "09:00:00",
-  shift_end_time: "18:00:00",
-  standard_work_hours: "8.00",
-  grace_period_minutes: 10,
-  overtime_multiplier: "1.00",
-  working_days_per_month: "26.00",
-  payroll_cycle: "monthly",
-  payroll_day: 1,
-  annual_paid_leaves: "12.00",
-  monthly_leave_accrual: "1.00",
-  unused_leave_action: "carry_forward",
-  default_leave_balance: "0.00",
-  late_penalty_per_minute: "0.00",
-  logo_url: "/uploads/logos/company-logo.png",
+  phone_number: "+919000000000",
+  registered_address: "123 Payroll Street\nMumbai",
+  logo_path: "company/logo.png",
+  logo_url: "/uploads/company/logo.png",
   logo_content_type: "image/png",
   logo_updated_at: "2026-05-17T08:30:00Z",
   created_at: "2026-05-17T08:00:00Z",
@@ -70,8 +54,8 @@ describe("BrandingProvider", () => {
 
     await waitFor(() => expect(screen.getByTestId("company-name")).toHaveTextContent("Persistent Brand Pvt Ltd"));
     expect(screen.getByTestId("address-lines")).toHaveTextContent("123 Payroll Street|Mumbai");
-    expect(screen.getByTestId("logo-url").textContent).toContain("/uploads/logos/company-logo.png?v=");
+    expect(screen.getByTestId("logo-url").textContent).toContain("/uploads/company/logo.png?v=");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/settings");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/company/settings");
   });
 });

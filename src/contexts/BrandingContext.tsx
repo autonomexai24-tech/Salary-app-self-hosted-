@@ -2,27 +2,27 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import {
   ApiError,
   apiErrorMessage,
-  readCompanySettings,
+  readCompanyProfile,
   resolveApiAssetUrl,
-  updateCompanySettings,
-  uploadCompanyLogo,
-  type BackendCompanySettings,
+  updateCompanyProfile,
+  uploadCompanyProfileLogo,
+  type BackendCompanyProfile,
 } from "@/lib/api";
 
 interface BrandingContextValue {
-  settings: BackendCompanySettings | null;
+  settings: BackendCompanyProfile | null;
   companyName: string;
   companyAddress: string;
   companyAddressLines: string[];
   logoUrl: string | null;
   isLoading: boolean;
   errorMessage: string | null;
-  refreshBranding: () => Promise<BackendCompanySettings | null>;
-  saveBranding: (payload: { company_name: string; address: string | null }) => Promise<BackendCompanySettings>;
-  uploadLogo: (file: File) => Promise<BackendCompanySettings>;
+  refreshBranding: () => Promise<BackendCompanyProfile | null>;
+  saveBranding: (payload: { company_name: string; phone_number?: string | null; registered_address: string | null }) => Promise<BackendCompanyProfile>;
+  uploadLogo: (file: File) => Promise<BackendCompanyProfile>;
 }
 
-const DEFAULT_COMPANY_NAME = "Salary & Advance Tracker";
+const DEFAULT_COMPANY_NAME = "Your Company";
 const BrandingContext = createContext<BrandingContextValue | null>(null);
 
 function brandingMessage(error: unknown): string {
@@ -43,7 +43,7 @@ export function logBrandingAssetMissing(url: string | null): void {
   console.error("Static asset missing", { url });
 }
 
-function versionedLogoUrl(settings: BackendCompanySettings | null): string | null {
+function versionedLogoUrl(settings: BackendCompanyProfile | null): string | null {
   const resolved = resolveApiAssetUrl(settings?.logo_url);
   if (!resolved || !settings?.logo_updated_at) return resolved;
   const separator = resolved.includes("?") ? "&" : "?";
@@ -51,14 +51,14 @@ function versionedLogoUrl(settings: BackendCompanySettings | null): string | nul
 }
 
 export function BrandingProvider({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = useState<BackendCompanySettings | null>(null);
+  const [settings, setSettings] = useState<BackendCompanyProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const refreshBranding = useCallback(async () => {
     setIsLoading(true);
     try {
-      const nextSettings = await readCompanySettings();
+      const nextSettings = await readCompanyProfile();
       setSettings(nextSettings);
       setErrorMessage(null);
       return nextSettings;
@@ -75,9 +75,9 @@ export function BrandingProvider({ children }: { children: ReactNode }) {
     void refreshBranding();
   }, [refreshBranding]);
 
-  const saveBranding = useCallback(async (payload: { company_name: string; address: string | null }) => {
+  const saveBranding = useCallback(async (payload: { company_name: string; phone_number?: string | null; registered_address: string | null }) => {
     try {
-      const nextSettings = await updateCompanySettings(payload);
+      const nextSettings = await updateCompanyProfile(payload);
       setSettings(nextSettings);
       setErrorMessage(null);
       return nextSettings;
@@ -90,7 +90,7 @@ export function BrandingProvider({ children }: { children: ReactNode }) {
 
   const uploadLogo = useCallback(async (file: File) => {
     try {
-      const nextSettings = await uploadCompanyLogo(file);
+      const nextSettings = await uploadCompanyProfileLogo(file);
       setSettings(nextSettings);
       setErrorMessage(null);
       return nextSettings;
@@ -103,7 +103,7 @@ export function BrandingProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<BrandingContextValue>(() => {
     const companyName = settings?.company_name?.trim() || DEFAULT_COMPANY_NAME;
-    const companyAddress = settings?.address ?? "";
+    const companyAddress = settings?.registered_address ?? "";
 
     return {
       settings,

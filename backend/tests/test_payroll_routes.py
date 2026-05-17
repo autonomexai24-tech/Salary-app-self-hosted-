@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import uuid
 import zipfile
+from base64 import b64decode
 from io import BytesIO
 from datetime import date, time, timedelta
 from decimal import Decimal
@@ -21,17 +22,33 @@ from backend.models import AttendanceEntry, AttendanceStatus, CompanySettings, E
 from backend.security import get_current_admin_user, get_current_user
 
 
+TINY_PNG = b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAKElEQVR4nGOUi9rCgA0wYRVlYGBggVAPl3rDheSjt+LTQboEI8muAgDDCAVpyGVqgAAAAABJRU5ErkJggg=="
+)
+
+
 class PayrollRouteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "payroll-route-test.db"
         self.upload_dir = Path(self.temp_dir.name) / "uploads"
         self.upload_dir.mkdir()
+        self.runtime_settings = SimpleNamespace(
+            upload_dir=self.upload_dir,
+            resolved_upload_dir=self.upload_dir,
+            normalized_upload_url_path="/uploads",
+            max_logo_upload_bytes=2 * 1024 * 1024,
+        )
         self.settings_patcher = patch(
             "backend.payroll.get_settings",
-            return_value=SimpleNamespace(upload_dir=self.upload_dir),
+            return_value=self.runtime_settings,
+        )
+        self.service_settings_patcher = patch(
+            "backend.services.company_settings_service.get_settings",
+            return_value=self.runtime_settings,
         )
         self.settings_patcher.start()
+        self.service_settings_patcher.start()
         self.employee_one_id = uuid.uuid4()
         self.employee_two_id = uuid.uuid4()
         self.admin_id = uuid.uuid4()
@@ -42,6 +59,7 @@ class PayrollRouteTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
+        self.service_settings_patcher.stop()
         self.settings_patcher.stop()
         self.engine.dispose()
         self.temp_dir.cleanup()
@@ -419,6 +437,47 @@ class PayrollRouteTests(unittest.TestCase):
                 archive.read("payslip-03-2026-EMP001.pdf"),
                 refreshed_pdf.content,
             )
+
+    def test_payslip_pdf_uses_central_company_logo_and_branding(self) -> None:
+        branding = self.client.put(
+            "/api/company/settings",
+            data={
+                "company_name": "PDF Brand Pvt Ltd",
+                "phone_number": "+91 98888 88888",
+                "registered_address": "Hyderabad, India",
+            },
+            files={"file": ("logo.png", TINY_PNG, "image/png")},
+        )
+        self.assertEqual(branding.status_code, 200, branding.text)
+        self.assertEqual(branding.json()["logo_url"], "/uploads/company/logo.png")
+        self.assertTrue((self.upload_dir / "company" / "logo.png").is_file())
+
+        saved = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())
+        self.assertEqual(saved.status_code, 201, saved.text)
+        first_item = saved.json()["items"][0]
+        pdf = self.client.get(f"/api/receipts/generate/{first_item['employee_id']}/03-2026")
+
+        self.assertEqual(pdf.status_code, 200, pdf.text)
+        self.assertTrue(pdf.content.startswith(b"%PDF"))
+        self.assertIn(b"/Subtype /Image", pdf.content)
+
+    def test_payslip_pdf_falls_back_without_logo_file(self) -> None:
+        with self.SessionLocal() as db:
+            settings = db.get(CompanySettings, 1)
+            self.assertIsNotNone(settings)
+            settings.company_name = "Fallback Brand Pvt Ltd"
+            settings.logo_path = "company/missing-logo.png"
+            settings.logo_content_type = "image/png"
+            settings.logo_updated_at = utc_now()
+            db.commit()
+
+        saved = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())
+        self.assertEqual(saved.status_code, 201, saved.text)
+        first_item = saved.json()["items"][0]
+        pdf = self.client.get(f"/api/receipts/generate/{first_item['employee_id']}/03-2026")
+
+        self.assertEqual(pdf.status_code, 200, pdf.text)
+        self.assertTrue(pdf.content.startswith(b"%PDF"))
 
     def test_locked_payroll_blocks_attendance_edits_and_recalculation(self) -> None:
         locked = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())

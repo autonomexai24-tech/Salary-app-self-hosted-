@@ -34,18 +34,26 @@ class DemoSeedTests(unittest.TestCase):
         self.settings = SimpleNamespace(
             upload_dir=self.upload_dir,
             resolved_upload_dir=self.upload_dir.resolve(),
+            normalized_upload_url_path="/uploads",
+            max_logo_upload_bytes=2 * 1024 * 1024,
         )
         self._configure_engine()
         Base.metadata.create_all(self.engine)
         self.demo_settings_patcher = patch("backend.demo_seed.get_settings", return_value=self.settings)
         self.payroll_settings_patcher = patch("backend.payroll.get_settings", return_value=self.settings)
+        self.service_settings_patcher = patch(
+            "backend.services.company_settings_service.get_settings",
+            return_value=self.settings,
+        )
         self.session_factory_patcher = patch("backend.demo_seed.get_session_factory", return_value=self.SessionLocal)
         self.demo_settings_patcher.start()
         self.payroll_settings_patcher.start()
+        self.service_settings_patcher.start()
         self.session_factory_patcher.start()
 
     def tearDown(self) -> None:
         self.session_factory_patcher.stop()
+        self.service_settings_patcher.stop()
         self.payroll_settings_patcher.stop()
         self.demo_settings_patcher.stop()
         self.engine.dispose()

@@ -30,7 +30,7 @@ class CompanySettingsCatalogRouteTests(unittest.TestCase):
         self.upload_dir = Path(self.temp_dir.name) / "uploads"
         self.upload_dir.mkdir()
         self.settings_patcher = patch(
-            "backend.company_settings.get_settings",
+            "backend.services.company_settings_service.get_settings",
             return_value=SimpleNamespace(
                 resolved_upload_dir=self.upload_dir,
                 normalized_upload_url_path="/uploads",
@@ -196,8 +196,9 @@ class CompanySettingsCatalogRouteTests(unittest.TestCase):
         self.assertEqual(upload.status_code, 200, upload.text)
         self.assertEqual(upload.json()["company_name"], "Persistent Brand Pvt Ltd")
         self.assertEqual(upload.json()["address"], "123 Payroll Street\nMumbai")
-        self.assertEqual(upload.json()["logo_url"], "/uploads/logos/company-logo.png")
-        self.assertTrue((self.upload_dir / "logos" / "company-logo.png").is_file())
+        self.assertEqual(upload.json()["registered_address"], "123 Payroll Street\nMumbai")
+        self.assertEqual(upload.json()["logo_url"], "/uploads/company/logo.png")
+        self.assertTrue((self.upload_dir / "company" / "logo.png").is_file())
 
         self.engine.dispose()
         self._configure_engine()
@@ -208,8 +209,72 @@ class CompanySettingsCatalogRouteTests(unittest.TestCase):
         self.assertEqual(restarted.status_code, 200, restarted.text)
         self.assertEqual(restarted.json()["company_name"], "Persistent Brand Pvt Ltd")
         self.assertEqual(restarted.json()["address"], "123 Payroll Street\nMumbai")
-        self.assertEqual(restarted.json()["logo_url"], "/uploads/logos/company-logo.png")
-        self.assertTrue((self.upload_dir / "logos" / "company-logo.png").is_file())
+        self.assertEqual(restarted.json()["registered_address"], "123 Payroll Street\nMumbai")
+        self.assertEqual(restarted.json()["logo_url"], "/uploads/company/logo.png")
+        self.assertTrue((self.upload_dir / "company" / "logo.png").is_file())
+
+    def test_canonical_company_profile_supports_partial_update_and_restart(self) -> None:
+        created = self.client.put(
+            "/api/company/settings",
+            json={
+                "company_name": "Central Brand Pvt Ltd",
+                "phone_number": "+91 90000 00000",
+            },
+        )
+        partial = self.client.put(
+            "/api/company/settings",
+            json={"registered_address": "Bangalore, India"},
+        )
+
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(partial.status_code, 200, partial.text)
+        self.assertEqual(partial.json()["company_name"], "Central Brand Pvt Ltd")
+        self.assertEqual(partial.json()["phone_number"], "+91 90000 00000")
+        self.assertEqual(partial.json()["registered_address"], "Bangalore, India")
+
+        self.engine.dispose()
+        self._configure_engine()
+        self._configure_overrides()
+        restarted_client = TestClient(app)
+        restarted = restarted_client.get("/api/company/settings")
+
+        self.assertEqual(restarted.status_code, 200, restarted.text)
+        self.assertEqual(restarted.json()["company_name"], "Central Brand Pvt Ltd")
+        self.assertEqual(restarted.json()["phone_number"], "+91 90000 00000")
+        self.assertEqual(restarted.json()["registered_address"], "Bangalore, India")
+
+    def test_canonical_company_profile_multipart_upload_validates_and_persists_logo(self) -> None:
+        uploaded = self.client.put(
+            "/api/company/settings",
+            data={
+                "company_name": "Multipart Brand Pvt Ltd",
+                "phone_number": "+91 91111 11111",
+                "registered_address": "Chennai, India",
+            },
+            files={"file": ("logo.png", TINY_PNG, "image/png")},
+        )
+
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        self.assertEqual(uploaded.json()["company_name"], "Multipart Brand Pvt Ltd")
+        self.assertEqual(uploaded.json()["phone_number"], "+91 91111 11111")
+        self.assertEqual(uploaded.json()["registered_address"], "Chennai, India")
+        self.assertEqual(uploaded.json()["logo_url"], "/uploads/company/logo.png")
+        self.assertTrue((self.upload_dir / "company" / "logo.png").is_file())
+
+    def test_logo_upload_rejects_svg_and_oversized_files(self) -> None:
+        invalid = self.client.put(
+            "/api/company/settings",
+            files={"file": ("logo.svg", b"<svg></svg>", "image/svg+xml")},
+        )
+        oversized = self.client.put(
+            "/api/company/settings",
+            files={"file": ("logo.png", b"\x89PNG\r\n\x1a\n" + b"0" * (2 * 1024 * 1024 + 1), "image/png")},
+        )
+
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertEqual(invalid.json()["detail"]["code"], "unsupported_logo_type")
+        self.assertEqual(oversized.status_code, 413, oversized.text)
+        self.assertEqual(oversized.json()["detail"]["code"], "logo_too_large")
 
 
 if __name__ == "__main__":

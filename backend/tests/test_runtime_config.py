@@ -77,7 +77,7 @@ class RuntimeConfigTests(unittest.TestCase):
             upload_dir = validate_upload_storage(settings)
 
             self.assertTrue(upload_dir.is_dir())
-            self.assertTrue((upload_dir / "logos").is_dir())
+            self.assertTrue((upload_dir / "company").is_dir())
             self.assertTrue((upload_dir / "payslips").is_dir())
 
     def test_local_cors_supports_multiple_vite_ports(self) -> None:

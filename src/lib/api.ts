@@ -155,6 +155,19 @@ export interface BackendCompanySettings {
   updated_at: string;
 }
 
+export interface BackendCompanyProfile {
+  id: number;
+  company_name: string;
+  phone_number?: string | null;
+  registered_address?: string | null;
+  logo_path?: string | null;
+  logo_url?: string | null;
+  logo_content_type?: string | null;
+  logo_updated_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BackendLeavePolicy {
   id: number;
   annual_paid_leaves: string | number;
@@ -602,8 +615,19 @@ export async function saveAttendanceEntry(entry: AttendanceEntry, date: string):
   });
 }
 
-export async function readCompanySettings(): Promise<BackendCompanySettings> {
-  return jsonRequest<BackendCompanySettings>("/api/settings");
+export async function readCompanyProfile(): Promise<BackendCompanyProfile> {
+  return jsonRequest<BackendCompanyProfile>("/api/company/settings");
+}
+
+export async function updateCompanyProfile(payload: Partial<{
+  company_name: string;
+  phone_number: string | null;
+  registered_address: string | null;
+}>): Promise<BackendCompanyProfile> {
+  return jsonRequest<BackendCompanyProfile>("/api/company/settings", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function updateCompanySettings(payload: Partial<{
@@ -656,11 +680,11 @@ export async function updateLeavePolicy(payload: Partial<{
   });
 }
 
-export async function uploadCompanyLogo(file: File): Promise<BackendCompanySettings> {
+export async function uploadCompanyProfileLogo(file: File): Promise<BackendCompanyProfile> {
   const formData = new FormData();
   formData.append("file", file);
-  return jsonRequest<BackendCompanySettings>("/api/settings/logo", {
-    method: "POST",
+  return jsonRequest<BackendCompanyProfile>("/api/company/settings", {
+    method: "PUT",
     body: formData,
   });
 }

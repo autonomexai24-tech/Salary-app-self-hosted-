@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import date as date_type
-from datetime import time
-from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -21,6 +19,7 @@ try:
         AttendanceEntryUpsert,
     )
     from .security import get_current_user
+    from .services.company_settings_service import get_company_profile
     from .time_helpers import calculate_attendance, money, time_rules_from_settings
     from .utils.payroll_helpers import format_month_year
     from .utils.payroll_locks import lock_payroll_month
@@ -34,15 +33,13 @@ except ImportError:
         AttendanceEntryUpsert,
     )
     from security import get_current_user
+    from services.company_settings_service import get_company_profile
     from time_helpers import calculate_attendance, money, time_rules_from_settings
     from utils.payroll_helpers import format_month_year
     from utils.payroll_locks import lock_payroll_month
 
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
-COMPANY_SETTINGS_ID = 1
-DEFAULT_COMPANY_NAME = "Your Company"
-
 
 def error_detail(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
@@ -59,21 +56,7 @@ def get_employee_or_404(db: Session, employee_id: uuid.UUID) -> Employee:
 
 
 def get_company_settings_for_timekeeping(db: Session) -> CompanySettings:
-    settings_record = db.get(CompanySettings, COMPANY_SETTINGS_ID)
-    if settings_record is not None:
-        return settings_record
-
-    settings_record = CompanySettings(
-        id=COMPANY_SETTINGS_ID,
-        company_name=DEFAULT_COMPANY_NAME,
-        shift_start_time=time(9, 0),
-        shift_end_time=time(18, 0),
-        standard_work_hours=Decimal("8.00"),
-        grace_period_minutes=10,
-        overtime_multiplier=Decimal("1.00"),
-    )
-    db.add(settings_record)
-    return settings_record
+    return get_company_profile(db)
 
 
 def find_attendance_entry(
