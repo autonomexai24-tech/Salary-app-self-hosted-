@@ -603,7 +603,7 @@ export async function saveAttendanceEntry(entry: AttendanceEntry, date: string):
 }
 
 export async function readCompanySettings(): Promise<BackendCompanySettings> {
-  return jsonRequest<BackendCompanySettings>("/api/settings/");
+  return jsonRequest<BackendCompanySettings>("/api/settings");
 }
 
 export async function updateCompanySettings(payload: Partial<{
@@ -628,7 +628,7 @@ export async function updateCompanySettings(payload: Partial<{
   default_leave_balance: number;
   late_penalty_per_minute: number;
 }>): Promise<BackendCompanySettings> {
-  return jsonRequest<BackendCompanySettings>("/api/settings/", {
+  return jsonRequest<BackendCompanySettings>("/api/settings", {
     method: "PUT",
     body: JSON.stringify(payload),
   });

@@ -72,7 +72,6 @@ describe("BrandingProvider", () => {
     expect(screen.getByTestId("address-lines")).toHaveTextContent("123 Payroll Street|Mumbai");
     expect(screen.getByTestId("logo-url").textContent).toContain("/uploads/logos/company-logo.png?v=");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/settings/");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/settings");
   });
 });
-
