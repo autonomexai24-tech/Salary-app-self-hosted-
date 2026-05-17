@@ -14,6 +14,7 @@ dist-ssr
 .env
 backend/.env
 backend/uploads/
+backend/uploads-dev-local/
 .phase4-runtime/
 .phase5c-runtime/
 .phase5d-runtime/

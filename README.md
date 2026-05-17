@@ -62,6 +62,10 @@ FRONTEND_URL=https://your-app-domain.example
 APP_BASE_URL=https://your-app-domain.example
 UPLOAD_PATH=/app/backend/uploads
 UPLOAD_URL_PATH=/uploads
+BOOTSTRAP_ADMIN_EMAIL=admin@dhanushpackaging.com
+BOOTSTRAP_ADMIN_NAME=Dhanush Packaging Admin
+BOOTSTRAP_ADMIN_PASSWORD=<set-a-strong-unique-admin-password>
+SEED_DEMO_DATA=false
 ```
 
 Optional environment variables:
@@ -89,12 +93,34 @@ This path must match `UPLOAD_PATH`. The app validates the directory and creates 
 
 ## First Admin User
 
-After deployment, create the initial admin user once:
+The production startup creates the first admin only when the `users` table is empty and
+`BOOTSTRAP_ADMIN_PASSWORD` is set to a strong production value. The local default
+password is intentionally blocked in production.
+
+Use this login after the first successful deployment:
+
+```text
+User ID / Email: admin@dhanushpackaging.com
+Password: the value you set for BOOTSTRAP_ADMIN_PASSWORD in Easypanel
+```
+
+If the database already exists and you need to create or reset the admin from the
+Easypanel app shell, run:
+
+```bash
+python -m backend.admin_cli \
+  --email admin@dhanushpackaging.com \
+  --full-name "Dhanush Packaging Admin" \
+  --password "set-a-strong-unique-admin-password"
+```
+
+If the `users` table is empty, you can also create the initial admin once through
+the bootstrap API:
 
 ```bash
 curl -X POST https://your-app-domain.example/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","full_name":"Admin User","password":"replace-with-a-strong-password"}'
+  -d '{"email":"admin@dhanushpackaging.com","full_name":"Dhanush Packaging Admin","password":"set-a-strong-unique-admin-password"}'
 ```
 
 Then sign in through the web UI with that email and password.
