@@ -209,11 +209,11 @@ def build_payslip_pdf(
 
     attendance_table = Table(
         [
-            ["Days Present", "Expected Hours", "Logged Hours"],
+            ["Days Present", "Absent Days", "Expected Hours"],
             [
                 str(ledger_row.days_present),
+                str(ledger_row.absent_days),
                 decimal_text(ledger_row.expected_hours),
-                decimal_text(ledger_row.hours_logged),
             ],
             ["Regular Hours", "Overtime Hours", "Shortfall Hours"],
             [
@@ -253,6 +253,7 @@ def build_payslip_pdf(
             ["Bonus / Incentive", money_text(ledger_row.bonus)],
             ["Gross Earnings", money_text(ledger_row.gross_pay)],
             ["Advance Recovery", f"({money_text(ledger_row.total_advances)})"],
+            ["Absent Deductions", f"({money_text(ledger_row.absent_deductions)})"],
             ["Late Deductions", f"({money_text(ledger_row.late_deductions)})"],
             ["Shortfall Deductions", f"({money_text(ledger_row.shortfall_deductions)})"],
             ["Other Fines", f"({money_text(ledger_row.other_fines)})"],

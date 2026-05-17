@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     db_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
     db_startup_retries: int = Field(default=30, ge=1, le=120)
     db_startup_retry_seconds: int = Field(default=2, ge=1, le=30)
+    seed_demo_data: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("SEED_DEMO_DATA", "DEMO_SEED_DATA"),
+    )
+    allow_sqlite_in_production: bool = Field(
+        default=False,
+        validation_alias="ALLOW_SQLITE_IN_PRODUCTION",
+    )
     secret_key: str = Field(
         default="dev-only-replace-this-jwt-secret-before-production",
         min_length=32,
@@ -127,8 +135,11 @@ class Settings(BaseSettings):
                 database_backend = make_url(self.database_url).get_backend_name()
             except Exception as exc:
                 raise ValueError("DATABASE_URL must be a valid database URL") from exc
-            if database_backend != "postgresql":
-                raise ValueError("DATABASE_URL must use PostgreSQL in production")
+            if database_backend != "postgresql" and not self.allow_sqlite_in_production:
+                raise ValueError(
+                    "DATABASE_URL must use PostgreSQL in production unless "
+                    "ALLOW_SQLITE_IN_PRODUCTION=true is set for a single-node demo"
+                )
             if self.secret_key.startswith("dev-only-") or self.secret_key in INSECURE_SECRET_VALUES:
                 raise ValueError("JWT_SECRET_KEY must be replaced in production")
             if not self.allowed_origins.strip():

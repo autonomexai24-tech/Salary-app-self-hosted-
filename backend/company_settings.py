@@ -54,6 +54,7 @@ COMPANY_SETTINGS_ID = 1
 DEFAULT_COMPANY_NAME = "Your Company"
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+company_settings_alias_router = APIRouter(prefix="/company-settings", tags=["company-settings"])
 
 
 def error_detail(code: str, message: str) -> dict[str, str]:
@@ -807,3 +808,63 @@ def delete_company_logo(
     db.refresh(settings_record)
 
     return settings_response(settings_record)
+
+
+@company_settings_alias_router.get("", response_model=CompanySettingsRead, summary="Read company settings")
+@company_settings_alias_router.get("/", response_model=CompanySettingsRead, summary="Read company settings", include_in_schema=False)
+def read_company_settings_alias(
+    db: Annotated[Session, Depends(get_db)],
+) -> CompanySettingsRead:
+    return read_company_settings(db=db)
+
+
+@company_settings_alias_router.put("", response_model=CompanySettingsRead, summary="Update company settings")
+@company_settings_alias_router.put("/", response_model=CompanySettingsRead, summary="Update company settings", include_in_schema=False)
+def update_company_settings_alias(
+    payload: CompanySettingsUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
+) -> CompanySettingsRead:
+    return update_company_settings(payload=payload, db=db, _=current_user)
+
+
+@company_settings_alias_router.get(
+    "/leave-policy",
+    response_model=LeavePolicyRead,
+    summary="Read leave and payroll policy settings",
+)
+def read_leave_policy_alias(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> LeavePolicyRead:
+    return read_leave_policy(db=db, _=current_user)
+
+
+@company_settings_alias_router.put(
+    "/leave-policy",
+    response_model=LeavePolicyRead,
+    summary="Update leave and payroll policy settings",
+)
+def update_leave_policy_alias(
+    payload: LeavePolicyUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
+) -> LeavePolicyRead:
+    return update_leave_policy(payload=payload, db=db, _=current_user)
+
+
+@company_settings_alias_router.post("/logo", response_model=CompanySettingsRead, summary="Upload company logo")
+async def upload_company_logo_alias(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
+) -> CompanySettingsRead:
+    return await upload_company_logo(request=request, db=db, _=current_user)
+
+
+@company_settings_alias_router.delete("/logo", response_model=CompanySettingsRead, summary="Remove company logo")
+def delete_company_logo_alias(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_admin_user)],
+) -> CompanySettingsRead:
+    return delete_company_logo(db=db, _=current_user)

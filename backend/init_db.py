@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import uuid
 from datetime import datetime, timezone
 
@@ -10,11 +11,13 @@ from sqlalchemy.exc import SQLAlchemyError
 try:
     from .database import Base, get_engine, get_settings
     from . import models  # noqa: F401
+    from .rates import calculate_rates
     from .schemas import UserCreate
     from .security import hash_password
 except ImportError:
     from database import Base, get_engine, get_settings
     import models  # noqa: F401
+    from rates import calculate_rates
     from schemas import UserCreate
     from security import hash_password
 
@@ -23,6 +26,439 @@ INSECURE_BOOTSTRAP_ADMIN_PASSWORDS = {
     "Admin@2026!Local",
     "replace-with-a-strong-password",
 }
+LEGACY_PEOPLE_TABLES = ("employees", "departments", "designations")
+
+
+def quote_identifier(identifier: str) -> str:
+    if not identifier.replace("_", "").isalnum() or identifier[0].isdigit():
+        raise ValueError(f"Unsafe SQL identifier: {identifier}")
+    return f'"{identifier}"'
+
+
+def table_exists(connection, table_name: str) -> bool:
+    if connection.dialect.name != "postgresql":
+        return False
+    return bool(
+        connection.execute(
+            text("SELECT to_regclass(:table_name)"),
+            {"table_name": f"public.{table_name}"},
+        ).scalar()
+    )
+
+
+def table_columns(connection, table_name: str) -> dict[str, str]:
+    if connection.dialect.name != "postgresql":
+        return {}
+    rows = connection.execute(
+        text(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    )
+    return {row.column_name: row.data_type for row in rows}
+
+
+def next_legacy_table_name(connection, table_name: str) -> str:
+    base_name = f"legacy_{table_name}"
+    if not table_exists(connection, base_name):
+        return base_name
+
+    suffix = 1
+    while table_exists(connection, f"{base_name}_{suffix}"):
+        suffix += 1
+    return f"{base_name}_{suffix}"
+
+
+def rename_table(connection, table_name: str, destination_name: str) -> None:
+    connection.execute(
+        text(
+            f"ALTER TABLE {quote_identifier(table_name)} "
+            f"RENAME TO {quote_identifier(destination_name)}"
+        )
+    )
+
+
+def needs_current_people_table(connection, table_name: str, required_columns: set[str]) -> bool:
+    columns = table_columns(connection, table_name)
+    if not columns:
+        return False
+    return columns.get("id") != "uuid" or not required_columns.issubset(columns)
+
+
+def prepare_legacy_people_tables(connection) -> None:
+    if connection.dialect.name != "postgresql":
+        return
+
+    required_columns_by_table = {
+        "employees": {
+            "employee_code",
+            "full_name",
+            "department",
+            "designation",
+            "monthly_basic",
+            "daily_rate",
+            "hourly_rate",
+            "minute_rate",
+        },
+        "departments": {"normalized_name"},
+        "designations": {"normalized_name"},
+    }
+    for table_name in LEGACY_PEOPLE_TABLES:
+        if not table_exists(connection, table_name):
+            continue
+        if not needs_current_people_table(
+            connection,
+            table_name,
+            required_columns_by_table[table_name],
+        ):
+            continue
+        rename_table(connection, table_name, next_legacy_table_name(connection, table_name))
+
+
+def legacy_table_names(connection, table_name: str) -> list[str]:
+    if connection.dialect.name != "postgresql":
+        return []
+    rows = connection.execute(
+        text(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND (table_name = :base_name OR table_name LIKE :numbered_name)
+            ORDER BY table_name
+            """
+        ),
+        {
+            "base_name": f"legacy_{table_name}",
+            "numbered_name": f"legacy_{table_name}_%",
+        },
+    )
+    return [row.table_name for row in rows]
+
+
+def decimal_or_default(value: object, default: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal(default)
+    return parsed if parsed >= 0 else Decimal(default)
+
+
+def positive_decimal_or_default(value: object, default: str) -> Decimal:
+    parsed = decimal_or_default(value, default)
+    return parsed if parsed > 0 else Decimal(default)
+
+
+def normalize_legacy_timestamp(value: object, fallback: datetime) -> datetime:
+    return value if isinstance(value, datetime) else fallback
+
+
+def insert_legacy_department(
+    connection,
+    *,
+    name: str,
+    is_active: bool,
+    created_at: datetime,
+    updated_at: datetime,
+) -> None:
+    normalized_name = normalized_catalog_name(name)
+    if not normalized_name:
+        return
+    connection.execute(
+        text(
+            """
+            INSERT INTO departments (id, name, normalized_name, is_active, created_at, updated_at)
+            VALUES (:id, :name, :normalized_name, :is_active, :created_at, :updated_at)
+            ON CONFLICT (normalized_name)
+            DO UPDATE SET
+                name = EXCLUDED.name,
+                is_active = departments.is_active OR EXCLUDED.is_active,
+                updated_at = GREATEST(departments.updated_at, EXCLUDED.updated_at)
+            """
+        ),
+        {
+            "id": uuid.uuid4(),
+            "name": " ".join(name.strip().split()),
+            "normalized_name": normalized_name,
+            "is_active": is_active,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        },
+    )
+
+
+def insert_legacy_designation(
+    connection,
+    *,
+    name: str,
+    is_active: bool,
+    created_at: datetime,
+    updated_at: datetime,
+) -> None:
+    normalized_name = normalized_catalog_name(name)
+    if not normalized_name:
+        return
+    connection.execute(
+        text(
+            """
+            INSERT INTO designations (id, name, normalized_name, is_active, created_at, updated_at)
+            VALUES (:id, :name, :normalized_name, :is_active, :created_at, :updated_at)
+            ON CONFLICT (normalized_name)
+            DO UPDATE SET
+                name = EXCLUDED.name,
+                is_active = designations.is_active OR EXCLUDED.is_active,
+                updated_at = GREATEST(designations.updated_at, EXCLUDED.updated_at)
+            """
+        ),
+        {
+            "id": uuid.uuid4(),
+            "name": " ".join(name.strip().split()),
+            "normalized_name": normalized_name,
+            "is_active": is_active,
+            "created_at": created_at,
+            "updated_at": updated_at,
+        },
+    )
+
+
+def migrate_legacy_departments(connection) -> None:
+    now = datetime.now(timezone.utc)
+    for table_name in legacy_table_names(connection, "departments"):
+        columns = table_columns(connection, table_name)
+        if "name" not in columns:
+            continue
+        created_expression = "created_at" if "created_at" in columns else "NULL"
+        updated_expression = "updated_at" if "updated_at" in columns else "NULL"
+        active_expression = "is_active" if "is_active" in columns else "TRUE"
+        rows = connection.execute(
+            text(
+                f"""
+                SELECT name,
+                       {active_expression} AS is_active,
+                       {created_expression} AS created_at,
+                       {updated_expression} AS updated_at
+                FROM {quote_identifier(table_name)}
+                WHERE name IS NOT NULL AND length(trim(name)) > 0
+                """
+            )
+        )
+        for row in rows:
+            created_at = normalize_legacy_timestamp(row.created_at, now)
+            insert_legacy_department(
+                connection,
+                name=row.name,
+                is_active=bool(row.is_active),
+                created_at=created_at,
+                updated_at=normalize_legacy_timestamp(row.updated_at, created_at),
+            )
+
+
+def migrate_legacy_designations(connection) -> None:
+    now = datetime.now(timezone.utc)
+    for table_name in legacy_table_names(connection, "designations"):
+        columns = table_columns(connection, table_name)
+        if "name" not in columns:
+            continue
+        created_expression = "created_at" if "created_at" in columns else "NULL"
+        updated_expression = "updated_at" if "updated_at" in columns else "NULL"
+        active_expression = "is_active" if "is_active" in columns else "TRUE"
+        rows = connection.execute(
+            text(
+                f"""
+                SELECT name,
+                       {active_expression} AS is_active,
+                       {created_expression} AS created_at,
+                       {updated_expression} AS updated_at
+                FROM {quote_identifier(table_name)}
+                WHERE name IS NOT NULL AND length(trim(name)) > 0
+                """
+            )
+        )
+        for row in rows:
+            created_at = normalize_legacy_timestamp(row.created_at, now)
+            insert_legacy_designation(
+                connection,
+                name=row.name,
+                is_active=bool(row.is_active),
+                created_at=created_at,
+                updated_at=normalize_legacy_timestamp(row.updated_at, created_at),
+            )
+
+
+def latest_legacy_salary(connection, legacy_employee_id: int) -> dict[str, object]:
+    if not table_exists(connection, "salaries"):
+        return {}
+    row = connection.execute(
+        text(
+            """
+            SELECT basic_salary, working_days, hours_per_day
+            FROM salaries
+            WHERE employee_id = :employee_id
+            ORDER BY year DESC, month DESC, created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"employee_id": legacy_employee_id},
+    ).mappings().first()
+    return dict(row or {})
+
+
+def legacy_department_name_by_id(connection) -> dict[int, str]:
+    department_names: dict[int, str] = {}
+    for table_name in legacy_table_names(connection, "departments"):
+        columns = table_columns(connection, table_name)
+        if not {"id", "name"}.issubset(columns):
+            continue
+        rows = connection.execute(
+            text(
+                f"""
+                SELECT id, name
+                FROM {quote_identifier(table_name)}
+                WHERE name IS NOT NULL AND length(trim(name)) > 0
+                """
+            )
+        )
+        for row in rows:
+            try:
+                department_names[int(row.id)] = " ".join(row.name.strip().split())
+            except (TypeError, ValueError):
+                continue
+    return department_names
+
+
+def migrate_legacy_employees(connection) -> None:
+    department_names = legacy_department_name_by_id(connection)
+    now = datetime.now(timezone.utc)
+    for table_name in legacy_table_names(connection, "employees"):
+        columns = table_columns(connection, table_name)
+        if "id" not in columns:
+            continue
+
+        rows = connection.execute(text(f"SELECT * FROM {quote_identifier(table_name)}")).mappings()
+        for row in rows:
+            try:
+                legacy_employee_id = int(row["id"])
+            except (TypeError, ValueError):
+                continue
+
+            first_name = str(row.get("first_name") or "").strip()
+            last_name = str(row.get("last_name") or "").strip()
+            full_name = " ".join(part for part in [first_name, last_name] if part)
+            if not full_name:
+                full_name = f"Employee {legacy_employee_id}"
+
+            department = department_names.get(row.get("department_id")) or "General"
+            designation = str(row.get("designation") or "").strip() or "Staff"
+            salary = latest_legacy_salary(connection, legacy_employee_id)
+            monthly_basic = decimal_or_default(salary.get("basic_salary"), "0.00")
+            working_days = positive_decimal_or_default(salary.get("working_days"), "30.00")
+            working_hours = positive_decimal_or_default(salary.get("hours_per_day"), "8.00")
+            rates = calculate_rates(monthly_basic, working_days, working_hours)
+            created_at = normalize_legacy_timestamp(row.get("created_at"), now)
+            updated_at = normalize_legacy_timestamp(row.get("updated_at"), created_at)
+            joining_value = row.get("joining_date")
+            if isinstance(joining_value, datetime):
+                joining_date = joining_value.date()
+            else:
+                joining_date = created_at.date()
+
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO employees (
+                        id,
+                        employee_code,
+                        full_name,
+                        phone_number,
+                        department,
+                        designation,
+                        joining_date,
+                        working_days_per_month,
+                        working_hours_per_day,
+                        leave_balance,
+                        daily_rate,
+                        hourly_rate,
+                        minute_rate,
+                        monthly_basic,
+                        is_active,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :id,
+                        :employee_code,
+                        :full_name,
+                        :phone_number,
+                        :department,
+                        :designation,
+                        :joining_date,
+                        :working_days_per_month,
+                        :working_hours_per_day,
+                        0.00,
+                        :daily_rate,
+                        :hourly_rate,
+                        :minute_rate,
+                        :monthly_basic,
+                        :is_active,
+                        :created_at,
+                        :updated_at
+                    )
+                    ON CONFLICT (employee_code)
+                    DO UPDATE SET
+                        full_name = EXCLUDED.full_name,
+                        phone_number = EXCLUDED.phone_number,
+                        department = EXCLUDED.department,
+                        designation = EXCLUDED.designation,
+                        joining_date = EXCLUDED.joining_date,
+                        working_days_per_month = EXCLUDED.working_days_per_month,
+                        working_hours_per_day = EXCLUDED.working_hours_per_day,
+                        daily_rate = EXCLUDED.daily_rate,
+                        hourly_rate = EXCLUDED.hourly_rate,
+                        minute_rate = EXCLUDED.minute_rate,
+                        monthly_basic = EXCLUDED.monthly_basic,
+                        is_active = EXCLUDED.is_active,
+                        updated_at = EXCLUDED.updated_at
+                    """
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "employee_code": f"EMP{legacy_employee_id:04}",
+                    "full_name": full_name,
+                    "phone_number": str(row.get("phone") or "").strip() or None,
+                    "department": department,
+                    "designation": designation,
+                    "joining_date": joining_date,
+                    "working_days_per_month": working_days,
+                    "working_hours_per_day": working_hours,
+                    "daily_rate": rates.daily_rate,
+                    "hourly_rate": rates.hourly_rate,
+                    "minute_rate": rates.minute_rate,
+                    "monthly_basic": monthly_basic,
+                    "is_active": bool(row.get("is_active", True)),
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                },
+            )
+
+            insert_legacy_department(
+                connection,
+                name=department,
+                is_active=True,
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+
+
+def migrate_legacy_people_data(connection) -> None:
+    if connection.dialect.name != "postgresql":
+        return
+    migrate_legacy_departments(connection)
+    migrate_legacy_designations(connection)
+    migrate_legacy_employees(connection)
 
 
 def apply_schema_updates(connection) -> None:
@@ -681,6 +1117,7 @@ def apply_schema_updates(connection) -> None:
         )
     )
     payroll_ledger_columns = [
+        ("absent_days", "INTEGER", "0"),
         ("expected_hours", "NUMERIC(7, 2)", "0.00"),
         ("hours_logged", "NUMERIC(7, 2)", "0.00"),
         ("shortfall_hours", "NUMERIC(7, 2)", "0.00"),
@@ -689,6 +1126,7 @@ def apply_schema_updates(connection) -> None:
         ("base_earned", "NUMERIC(14, 2)", "0.00"),
         ("overtime_pay", "NUMERIC(14, 2)", "0.00"),
         ("bonus", "NUMERIC(14, 2)", "0.00"),
+        ("absent_deductions", "NUMERIC(14, 2)", "0.00"),
         ("late_deductions", "NUMERIC(14, 2)", "0.00"),
         ("shortfall_deductions", "NUMERIC(14, 2)", "0.00"),
         ("other_fines", "NUMERIC(14, 2)", "0.00"),
@@ -710,6 +1148,7 @@ def apply_schema_updates(connection) -> None:
             UPDATE payroll_ledger
             SET
                 hours_logged = COALESCE(hours_logged, regular_hours + overtime_hours, 0.00),
+                absent_days = COALESCE(absent_days, 0),
                 expected_hours = COALESCE(NULLIF(expected_hours, 0.00), regular_hours + overtime_hours, 0.00),
                 shortfall_hours = COALESCE(shortfall_hours, 0.00),
                 leave_days = COALESCE(leave_days, 0),
@@ -717,6 +1156,7 @@ def apply_schema_updates(connection) -> None:
                 base_earned = COALESCE(NULLIF(base_earned, 0.00), gross_pay, 0.00),
                 overtime_pay = COALESCE(overtime_pay, 0.00),
                 bonus = COALESCE(bonus, 0.00),
+                absent_deductions = COALESCE(absent_deductions, 0.00),
                 late_deductions = COALESCE(late_deductions, total_penalties, 0.00),
                 shortfall_deductions = COALESCE(shortfall_deductions, 0.00),
                 other_fines = COALESCE(other_fines, 0.00),
@@ -729,6 +1169,7 @@ def apply_schema_updates(connection) -> None:
         connection.execute(text(f"ALTER TABLE payroll_ledger ALTER COLUMN {column_name} SET NOT NULL"))
 
     payroll_ledger_constraints = [
+        ("ck_payroll_ledger_payroll_ledger_absent_days_non_negative", "absent_days >= 0"),
         ("ck_payroll_ledger_payroll_ledger_expected_hours_non_negative", "expected_hours >= 0"),
         ("ck_payroll_ledger_payroll_ledger_hours_logged_non_negative", "hours_logged >= 0"),
         ("ck_payroll_ledger_payroll_ledger_shortfall_hours_non_negative", "shortfall_hours >= 0"),
@@ -737,6 +1178,7 @@ def apply_schema_updates(connection) -> None:
         ("ck_payroll_ledger_payroll_ledger_base_earned_non_negative", "base_earned >= 0"),
         ("ck_payroll_ledger_payroll_ledger_overtime_pay_non_negative", "overtime_pay >= 0"),
         ("ck_payroll_ledger_payroll_ledger_bonus_non_negative", "bonus >= 0"),
+        ("ck_payroll_ledger_payroll_ledger_absent_deductions_non_negative", "absent_deductions >= 0"),
         ("ck_payroll_ledger_payroll_ledger_late_deductions_non_negative", "late_deductions >= 0"),
         ("ck_payroll_ledger_payroll_ledger_shortfall_deductions_non_negative", "shortfall_deductions >= 0"),
         ("ck_payroll_ledger_payroll_ledger_other_fines_non_negative", "other_fines >= 0"),
@@ -1005,13 +1447,23 @@ def seed_default_admin(connection) -> None:
 
 def init_db() -> None:
     engine = get_engine()
+    settings = get_settings()
     try:
         with engine.begin() as connection:
             connection.execute(text("SELECT 1"))
+            prepare_legacy_people_tables(connection)
             Base.metadata.create_all(bind=connection)
+            migrate_legacy_people_data(connection)
             apply_schema_updates(connection)
             seed_catalogs_from_existing_employees(connection)
             seed_default_admin(connection)
+        if settings.seed_demo_data:
+            try:
+                from .demo_seed import seed_demo_data
+            except ImportError:
+                from demo_seed import seed_demo_data
+
+            seed_demo_data()
     except (SQLAlchemyError, ValidationError, ValueError) as exc:
         raise RuntimeError(f"Database initialization failed: {exc.__class__.__name__}") from exc
 

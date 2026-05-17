@@ -387,6 +387,10 @@ class Employee(Base):
     payroll_line_items: Mapped[list[PayrollLineItem]] = relationship(
         back_populates="employee",
     )
+    salary_advances: Mapped[list[SalaryAdvance]] = relationship(
+        back_populates="employee",
+        cascade="all, delete-orphan",
+    )
 
 
 class AttendanceEntry(Base):
@@ -448,6 +452,54 @@ class AttendanceEntry(Base):
     )
 
     employee: Mapped[Employee] = relationship(back_populates="attendance_entries")
+
+
+class SalaryAdvance(Base):
+    __tablename__ = "salary_advances"
+    __table_args__ = (
+        CheckConstraint("amount >= 0", name="salary_advances_amount_non_negative"),
+        CheckConstraint("recovery_months > 0", name="salary_advances_recovery_months_positive"),
+        CheckConstraint("monthly_deduction >= 0", name="salary_advances_monthly_deduction_non_negative"),
+        CheckConstraint("recovered_amount >= 0", name="salary_advances_recovered_amount_non_negative"),
+        CheckConstraint("start_month >= 1 AND start_month <= 12", name="salary_advances_start_month_valid"),
+        CheckConstraint("length(start_month_year) = 7", name="salary_advances_start_month_year_format"),
+        Index("ix_salary_advances_employee_active", "employee_id", "is_active"),
+        Index("ix_salary_advances_start_month_year", "start_month_year"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    recovery_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    monthly_deduction: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    recovered_amount: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    start_month_year: Mapped[str] = mapped_column(String(7), nullable=False)
+    start_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+    employee: Mapped[Employee] = relationship(back_populates="salary_advances")
 
 
 class PayrollRun(Base):
@@ -549,6 +601,7 @@ class PayrollLedger(Base):
         CheckConstraint("length(month_year) = 7", name="payroll_ledger_month_year_format"),
         CheckConstraint("period_end >= period_start", name="payroll_ledger_valid_period"),
         CheckConstraint("days_present >= 0", name="payroll_ledger_days_present_non_negative"),
+        CheckConstraint("absent_days >= 0", name="payroll_ledger_absent_days_non_negative"),
         CheckConstraint("expected_hours >= 0", name="payroll_ledger_expected_hours_non_negative"),
         CheckConstraint("hours_logged >= 0", name="payroll_ledger_hours_logged_non_negative"),
         CheckConstraint("regular_hours >= 0", name="payroll_ledger_regular_hours_non_negative"),
@@ -561,6 +614,7 @@ class PayrollLedger(Base):
         CheckConstraint("bonus >= 0", name="payroll_ledger_bonus_non_negative"),
         CheckConstraint("gross_pay >= 0", name="payroll_ledger_gross_pay_non_negative"),
         CheckConstraint("total_advances >= 0", name="payroll_ledger_advances_non_negative"),
+        CheckConstraint("absent_deductions >= 0", name="payroll_ledger_absent_deductions_non_negative"),
         CheckConstraint("late_deductions >= 0", name="payroll_ledger_late_deductions_non_negative"),
         CheckConstraint("shortfall_deductions >= 0", name="payroll_ledger_shortfall_deductions_non_negative"),
         CheckConstraint("other_fines >= 0", name="payroll_ledger_other_fines_non_negative"),
@@ -592,6 +646,7 @@ class PayrollLedger(Base):
     department: Mapped[str] = mapped_column(String(100), nullable=False)
     designation: Mapped[str] = mapped_column(String(120), nullable=False)
     days_present: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    absent_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     expected_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
     hours_logged: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
     regular_hours: Mapped[Decimal] = mapped_column(Hours, default=Decimal("0.00"), nullable=False)
@@ -604,6 +659,7 @@ class PayrollLedger(Base):
     bonus: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     gross_pay: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     total_advances: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
+    absent_deductions: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     late_deductions: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     shortfall_deductions: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)
     other_fines: Mapped[Decimal] = mapped_column(Money, default=Decimal("0.00"), nullable=False)

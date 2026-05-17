@@ -4,8 +4,9 @@ import { AppSidebar } from "@/components/AppSidebar";
 import { useAuth } from "@/contexts/AuthContext";
 
 export function AppLayout() {
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
 
+  if (isLoading) return null;
   if (!user) return <Navigate to="/login" replace />;
 
   return (
@@ -29,7 +30,8 @@ export function AppLayout() {
 
 /** Wrapper that redirects non-admin users to Daily Log */
 export function AdminRoute({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
+  if (isLoading) return null;
   if (!user) return <Navigate to="/login" replace />;
   if (user.role !== "admin") return <Navigate to="/" replace />;
   return <>{children}</>;

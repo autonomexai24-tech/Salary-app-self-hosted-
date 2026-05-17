@@ -1,6 +1,7 @@
 import {
   API_BASE_URL,
   ApiError,
+  AUTH_UNAUTHORIZED_EVENT,
   clearStoredAuthToken,
   fileRequest,
   getStoredAuthToken,
@@ -11,6 +12,7 @@ import {
 export {
   API_BASE_URL,
   ApiError,
+  AUTH_UNAUTHORIZED_EVENT,
   clearStoredAuthToken,
   getStoredAuthToken,
   setStoredAuthToken,

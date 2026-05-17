@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +34,7 @@ import {
   type BackendSettingsCatalogItem,
 } from "@/lib/api";
 import { toast } from "sonner";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface Holiday {
   id: string;
@@ -63,6 +64,40 @@ function mapHoliday(record: BackendHoliday): Holiday {
 
 function catalogNames(records: BackendSettingsCatalogItem[]): string[] {
   return records.map((record) => record.name);
+}
+
+const OFFLINE_STORAGE_KEYS = {
+  designations: "payroll_offline_designations",
+  departments: "payroll_offline_departments",
+  holidays: "payroll_offline_holidays",
+  timings: "payroll_offline_timings",
+  leavePolicy: "payroll_offline_leave_policy",
+} as const;
+
+function readOfflineJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeOfflineJson(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* ignore */ }
+}
+
+function makeLocalCatalogItem(name: string): BackendSettingsCatalogItem {
+  const now = new Date().toISOString();
+  return {
+    id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    is_active: true,
+    created_at: now,
+    updated_at: now,
+  };
 }
 
 export default function CompanySettings({
@@ -104,6 +139,9 @@ export default function CompanySettings({
   const [designationRecords, setDesignationRecords] = useState<BackendSettingsCatalogItem[]>([]);
   const [departmentRecords, setDepartmentRecords] = useState<BackendSettingsCatalogItem[]>([]);
 
+  const { user } = useAuth();
+  const isOffline = user?.id === "offline-admin";
+
   const syncDesignations = (records: BackendSettingsCatalogItem[]) => {
     setDesignationRecords(records);
     setDesignations(catalogNames(records));
@@ -116,6 +154,32 @@ export default function CompanySettings({
 
   useEffect(() => {
     let cancelled = false;
+
+    if (isOffline) {
+      // Load from localStorage in offline mode
+      const offDesg = readOfflineJson<BackendSettingsCatalogItem[]>(OFFLINE_STORAGE_KEYS.designations, []);
+      const offDept = readOfflineJson<BackendSettingsCatalogItem[]>(OFFLINE_STORAGE_KEYS.departments, []);
+      const offHol = readOfflineJson<Holiday[]>(OFFLINE_STORAGE_KEYS.holidays, []);
+      const offTimings = readOfflineJson<{ shiftStart: string; shiftEnd: string; workingHours: string; gracePeriod: string } | null>(OFFLINE_STORAGE_KEYS.timings, null);
+      const offLeave = readOfflineJson<{ annualLeaves: string; monthlyAccrual: string; unusedLeaveAction: string } | null>(OFFLINE_STORAGE_KEYS.leavePolicy, null);
+      setDesignationRecords(offDesg);
+      setDesignations(catalogNames(offDesg));
+      setDepartmentRecords(offDept);
+      setDepartments(catalogNames(offDept));
+      setHolidays(offHol.map((h) => ({ ...h, date: new Date(h.date) })));
+      if (offTimings) {
+        setShiftStart(offTimings.shiftStart);
+        setShiftEnd(offTimings.shiftEnd);
+        setWorkingHours(offTimings.workingHours);
+        setGracePeriod(offTimings.gracePeriod);
+      }
+      if (offLeave) {
+        setAnnualLeaves(offLeave.annualLeaves);
+        setMonthlyAccrual(offLeave.monthlyAccrual);
+        setUnusedLeaveAction(offLeave.unusedLeaveAction);
+      }
+      return () => { cancelled = true; };
+    }
 
     readCompanySettings()
       .then((settings) => {
@@ -193,7 +257,7 @@ export default function CompanySettings({
     return () => {
       cancelled = true;
     };
-  }, [setDepartments, setDesignations]);
+  }, [setDepartments, setDesignations, isOffline]);
 
   const formatShiftLabel = (time: string) => {
     if (!time) return "";
@@ -215,6 +279,16 @@ export default function CompanySettings({
     const val = newDesignation.trim();
     if (!val || designations.includes(val)) return;
 
+    if (isOffline) {
+      const created = makeLocalCatalogItem(val);
+      const nextRecords = [...designationRecords, created];
+      syncDesignations(nextRecords);
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.designations, nextRecords);
+      setNewDesignation("");
+      toast.success("Designation added (offline)");
+      return;
+    }
+
     try {
       const created = await createDesignation(val);
       const nextRecords = [
@@ -234,6 +308,16 @@ export default function CompanySettings({
     const val = newDepartment.trim();
     if (!val || departments.includes(val)) return;
 
+    if (isOffline) {
+      const created = makeLocalCatalogItem(val);
+      const nextRecords = [...departmentRecords, created];
+      syncDepartments(nextRecords);
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.departments, nextRecords);
+      setNewDepartment("");
+      toast.success("Department added (offline)");
+      return;
+    }
+
     try {
       const created = await createDepartment(val);
       const nextRecords = [
@@ -252,6 +336,21 @@ export default function CompanySettings({
   const addHoliday = async () => {
     if (!holidayDate || !holidayName.trim()) return;
 
+    if (isOffline) {
+      const localHoliday: Holiday = {
+        id: `local-${Date.now()}`,
+        date: holidayDate,
+        name: holidayName.trim(),
+      };
+      const next = [...holidays, localHoliday];
+      setHolidays(next);
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.holidays, next);
+      setHolidayDate(undefined);
+      setHolidayName("");
+      toast.success("Holiday added (offline)");
+      return;
+    }
+
     try {
       const created = await createHoliday({
         date: dateInputValue(holidayDate),
@@ -269,6 +368,12 @@ export default function CompanySettings({
 
   const saveMasterTimings = async () => {
     setIsSavingTimings(true);
+    if (isOffline) {
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.timings, { shiftStart, shiftEnd, workingHours, gracePeriod });
+      toast.success("Master timings saved (offline)");
+      setIsSavingTimings(false);
+      return;
+    }
     try {
       await updateCompanySettings({
         shift_start_time: shiftStart,
@@ -288,6 +393,11 @@ export default function CompanySettings({
 
   const saveBranding = async () => {
     setIsSavingBranding(true);
+    if (isOffline) {
+      toast.success("Company branding saved (offline)");
+      setIsSavingBranding(false);
+      return;
+    }
     try {
       const settings = await updateCompanySettings({
         company_name: companyName.trim(),
@@ -306,6 +416,11 @@ export default function CompanySettings({
   };
 
   const saveLeaveRules = async () => {
+    if (isOffline) {
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.leavePolicy, { annualLeaves, monthlyAccrual, unusedLeaveAction });
+      toast.success("Leave rules saved (offline)");
+      return;
+    }
     try {
       const policy = await updateLeavePolicy({
         annual_paid_leaves: Number(annualLeaves) || 0,
@@ -358,7 +473,12 @@ export default function CompanySettings({
 
   const removeHoliday = async (holiday: Holiday) => {
     const previousHolidays = holidays;
-    setHolidays((prev) => prev.filter((item) => item.id !== holiday.id));
+    const next = holidays.filter((item) => item.id !== holiday.id);
+    setHolidays(next);
+    if (isOffline) {
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.holidays, next);
+      return;
+    }
     try {
       await deleteHoliday(holiday.id);
     } catch (error) {
@@ -376,6 +496,13 @@ export default function CompanySettings({
       return;
     }
 
+    if (isOffline) {
+      const nextRecords = designationRecords.filter((item) => item.id !== record.id);
+      syncDesignations(nextRecords);
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.designations, nextRecords);
+      return;
+    }
+
     try {
       await deleteDesignation(record.id);
       syncDesignations(designationRecords.filter((item) => item.id !== record.id));
@@ -390,6 +517,13 @@ export default function CompanySettings({
     const record = departmentRecords.find((item) => item.name === name);
     if (!record) {
       setDepartments((prev) => prev.filter((item) => item !== name));
+      return;
+    }
+
+    if (isOffline) {
+      const nextRecords = departmentRecords.filter((item) => item.id !== record.id);
+      syncDepartments(nextRecords);
+      writeOfflineJson(OFFLINE_STORAGE_KEYS.departments, nextRecords);
       return;
     }
 

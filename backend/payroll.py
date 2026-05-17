@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session, selectinload
 
 try:
     from .database import get_db, get_settings
-    from .models import AttendanceEntry, CompanySettings, Employee, PayrollLedger, PayrollRunStatus, User, utc_now
+    from .models import AttendanceEntry, CompanySettings, Employee, PayrollLedger, PayrollRunStatus, SalaryAdvance, User, utc_now
     from .schemas import (
         PayrollCalculationRequest,
         PayrollLedgerLineRead,
@@ -24,6 +24,9 @@ try:
         PayrollLedgerSaveRequest,
         PayrollPreviewLineRead,
         PayrollPreviewRead,
+        SalaryAdvanceCreate,
+        SalaryAdvanceList,
+        SalaryAdvanceRead,
     )
     from .security import get_current_admin_user
     from .utils.payroll_helpers import (
@@ -40,7 +43,7 @@ try:
     from .utils.payslip_pdf import build_payslip_pdf
 except ImportError:
     from database import get_db, get_settings
-    from models import AttendanceEntry, CompanySettings, Employee, PayrollLedger, PayrollRunStatus, User, utc_now
+    from models import AttendanceEntry, CompanySettings, Employee, PayrollLedger, PayrollRunStatus, SalaryAdvance, User, utc_now
     from schemas import (
         PayrollCalculationRequest,
         PayrollLedgerLineRead,
@@ -48,6 +51,9 @@ except ImportError:
         PayrollLedgerSaveRequest,
         PayrollPreviewLineRead,
         PayrollPreviewRead,
+        SalaryAdvanceCreate,
+        SalaryAdvanceList,
+        SalaryAdvanceRead,
     )
     from security import get_current_admin_user
     from utils.payroll_helpers import (
@@ -66,6 +72,7 @@ except ImportError:
 
 router = APIRouter(prefix="/payroll", tags=["payroll"])
 receipts_router = APIRouter(prefix="/receipts", tags=["receipts"])
+payslips_router = APIRouter(prefix="/payslips", tags=["payslips"])
 COMPANY_SETTINGS_ID = 1
 DEFAULT_COMPANY_NAME = "Your Company"
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
@@ -107,7 +114,9 @@ def payroll_employee_from_model(employee: Employee) -> PayrollEmployee:
         department=employee.department,
         designation=employee.designation,
         monthly_basic=employee.monthly_basic,
+        daily_rate=employee.daily_rate,
         hourly_rate=employee.hourly_rate,
+        minute_rate=employee.minute_rate,
         working_days_per_month=employee.working_days_per_month,
         working_hours_per_day=employee.working_hours_per_day,
         leave_balance=employee.leave_balance,
@@ -222,6 +231,79 @@ def get_company_settings_for_payroll(db: Session) -> CompanySettings:
     )
 
 
+def month_index(month_year: str) -> tuple[int, int]:
+    period_start, _ = parse_month_year(month_year)
+    return period_start.year, period_start.month
+
+
+def salary_advance_response(row: SalaryAdvance) -> SalaryAdvanceRead:
+    return SalaryAdvanceRead(
+        id=row.id,
+        employee_id=row.employee_id,
+        amount=row.amount,
+        recovery_months=row.recovery_months,
+        monthly_deduction=row.monthly_deduction,
+        recovered_amount=row.recovered_amount,
+        start_month_year=row.start_month_year,
+        notes=row.notes,
+        is_active=row.is_active,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def advance_deduction_for_month(advance: SalaryAdvance, month_year: str) -> Decimal:
+    year, month = month_index(month_year)
+    months_elapsed = (year - advance.start_year) * 12 + (month - advance.start_month)
+    if months_elapsed < 0 or months_elapsed >= advance.recovery_months:
+        return Decimal("0.00")
+
+    remaining = money(advance.amount - advance.recovered_amount)
+    if not advance.is_active or remaining <= 0:
+        return Decimal("0.00")
+    return money(min(advance.monthly_deduction, remaining))
+
+
+def active_advance_recoveries_for_month(
+    db: Session,
+    *,
+    month_year: str,
+) -> tuple[dict[uuid.UUID, Decimal], dict[uuid.UUID, Decimal]]:
+    advances = db.scalars(
+        select(SalaryAdvance)
+        .where(SalaryAdvance.is_active.is_(True))
+        .order_by(SalaryAdvance.created_at.asc())
+    ).all()
+
+    recoveries: dict[uuid.UUID, Decimal] = {}
+    advance_recoveries: dict[uuid.UUID, Decimal] = {}
+    for advance in advances:
+        deduction = advance_deduction_for_month(advance, month_year)
+        if deduction <= 0:
+            continue
+        recoveries[advance.employee_id] = money(
+            recoveries.get(advance.employee_id, Decimal("0.00")) + deduction
+        )
+        advance_recoveries[advance.id] = deduction
+    return recoveries, advance_recoveries
+
+
+def apply_salary_advance_recoveries(
+    db: Session,
+    *,
+    advance_recoveries: dict[uuid.UUID, Decimal],
+) -> None:
+    for advance_id, deduction in advance_recoveries.items():
+        advance = db.get(SalaryAdvance, advance_id)
+        if advance is None:
+            continue
+        advance.recovered_amount = money(advance.recovered_amount + deduction)
+        if advance.recovered_amount >= advance.amount:
+            advance.recovered_amount = money(advance.amount)
+            advance.is_active = False
+        advance.updated_at = utc_now()
+
+
 def payroll_preview_response(preview: PayrollPreview) -> PayrollPreviewRead:
     return PayrollPreviewRead(
         period_start=preview.period_start,
@@ -235,6 +317,7 @@ def payroll_preview_response(preview: PayrollPreview) -> PayrollPreviewRead:
                 department=line.department,
                 designation=line.designation,
                 days_present=line.days_present,
+                absent_days=line.absent_days,
                 expected_hours=line.expected_hours,
                 hours_logged=line.hours_logged,
                 regular_hours=line.regular_hours,
@@ -247,6 +330,7 @@ def payroll_preview_response(preview: PayrollPreview) -> PayrollPreviewRead:
                 bonus=line.bonus,
                 gross_pay=line.gross_pay,
                 total_advances=line.total_advances,
+                absent_deductions=line.absent_deductions,
                 late_deductions=line.late_deductions,
                 shortfall_deductions=line.shortfall_deductions,
                 other_fines=line.other_fines,
@@ -275,6 +359,7 @@ def ledger_line_response(row: PayrollLedger) -> PayrollLedgerLineRead:
         department=row.department,
         designation=row.designation,
         days_present=row.days_present,
+        absent_days=row.absent_days,
         expected_hours=row.expected_hours,
         hours_logged=row.hours_logged,
         regular_hours=row.regular_hours,
@@ -287,6 +372,7 @@ def ledger_line_response(row: PayrollLedger) -> PayrollLedgerLineRead:
         bonus=row.bonus,
         gross_pay=row.gross_pay,
         total_advances=row.total_advances,
+        absent_deductions=row.absent_deductions,
         late_deductions=row.late_deductions,
         shortfall_deductions=row.shortfall_deductions,
         other_fines=row.other_fines,
@@ -418,7 +504,7 @@ def ensure_locked_payslip_row(row: PayrollLedger) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_unlocked",
-                f"Payroll for {row.month_year} must be locked before payslips can be generated",
+                "Approve and lock payroll before generating payslips",
             ),
         )
 
@@ -511,7 +597,7 @@ def ensure_payroll_month_not_saved(db: Session, *, month_year: str) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_locked",
-                f"Payroll for {month_year} has already been saved and locked",
+                "Payroll already approved and locked for this month",
             ),
         )
 
@@ -536,7 +622,7 @@ def ensure_payroll_period_recalculable(
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_locked",
-                f"Payroll for {locked_month} has already been saved and locked",
+                "Payroll already approved and locked for this month",
             ),
         )
 
@@ -553,6 +639,8 @@ def preview_payroll_for_period(
         period_start=period_start,
         period_end=period_end,
     )
+    month_year = period_start.strftime("%m-%Y")
+    recoveries, _ = active_advance_recoveries_for_month(db, month_year=month_year)
     preview = calculate_payroll_preview(
         employees=load_payroll_employees(db, period_start=period_start, period_end=period_end),
         logs=load_attendance_logs(db, period_start=period_start, period_end=period_end),
@@ -560,6 +648,7 @@ def preview_payroll_for_period(
         period_end=period_end,
         policy=payroll_policy_from_settings(get_company_settings_for_payroll(db)),
         overrides=overrides,
+        advance_recoveries=recoveries,
     )
     return payroll_preview_response(preview)
 
@@ -585,6 +674,67 @@ def preview_payroll(
         period_start=period_start,
         period_end=period_end,
     )
+
+
+@router.get(
+    "/advances",
+    response_model=SalaryAdvanceList,
+    summary="List salary advances",
+)
+def list_salary_advances(
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+    employee_id: uuid.UUID | None = None,
+    active: bool | None = None,
+) -> SalaryAdvanceList:
+    statement = select(SalaryAdvance).order_by(SalaryAdvance.created_at.desc())
+    if employee_id is not None:
+        statement = statement.where(SalaryAdvance.employee_id == employee_id)
+    if active is not None:
+        statement = statement.where(SalaryAdvance.is_active.is_(active))
+
+    advances = list(db.scalars(statement).all())
+    return SalaryAdvanceList(
+        items=[salary_advance_response(advance) for advance in advances],
+        total=len(advances),
+    )
+
+
+@router.post(
+    "/advances",
+    response_model=SalaryAdvanceRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an employee salary advance recovery plan",
+)
+def create_salary_advance(
+    payload: SalaryAdvanceCreate,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> SalaryAdvanceRead:
+    employee = db.get(Employee, payload.employee_id)
+    if employee is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=error_detail("employee_not_found", "Employee was not found"),
+        )
+
+    start_year, start_month = month_index(payload.start_month_year)
+    advance = SalaryAdvance(
+        employee_id=payload.employee_id,
+        amount=money(payload.amount),
+        recovery_months=payload.recovery_months,
+        monthly_deduction=money(payload.amount / Decimal(payload.recovery_months)),
+        recovered_amount=Decimal("0.00"),
+        start_month_year=payload.start_month_year,
+        start_year=start_year,
+        start_month=start_month,
+        notes=payload.notes,
+        is_active=True,
+    )
+    db.add(advance)
+    db.commit()
+    db.refresh(advance)
+    return salary_advance_response(advance)
 
 
 @router.post(
@@ -666,7 +816,7 @@ def read_payroll_ledger(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=error_detail(
                 "payroll_ledger_not_found",
-                f"No saved payroll ledger exists for {month_year}",
+                "No approved payroll found for this month",
             ),
         )
 
@@ -689,6 +839,7 @@ def save_payroll_ledger_for_month(
     lock_payroll_month(db, month_year)
     ensure_payroll_month_not_saved(db, month_year=month_year)
 
+    recoveries, advance_recoveries = active_advance_recoveries_for_month(db, month_year=month_year)
     preview = calculate_payroll_preview(
         employees=load_payroll_employees(db, period_start=period_start, period_end=period_end),
         logs=load_attendance_logs(db, period_start=period_start, period_end=period_end),
@@ -696,13 +847,14 @@ def save_payroll_ledger_for_month(
         period_end=period_end,
         policy=payroll_policy_from_settings(get_company_settings_for_payroll(db)),
         overrides=overrides,
+        advance_recoveries=recoveries,
     )
     if not preview.line_items:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_detail(
                 "empty_payroll_period",
-                f"No attendance entries exist for {month_year}",
+                "Add attendance for this month before approving payroll",
             ),
         )
 
@@ -718,6 +870,7 @@ def save_payroll_ledger_for_month(
             department=line.department,
             designation=line.designation,
             days_present=line.days_present,
+            absent_days=line.absent_days,
             expected_hours=line.expected_hours,
             hours_logged=line.hours_logged,
             regular_hours=line.regular_hours,
@@ -730,6 +883,7 @@ def save_payroll_ledger_for_month(
             bonus=line.bonus,
             gross_pay=line.gross_pay,
             total_advances=line.total_advances,
+            absent_deductions=line.absent_deductions,
             late_deductions=line.late_deductions,
             shortfall_deductions=line.shortfall_deductions,
             other_fines=line.other_fines,
@@ -750,6 +904,7 @@ def save_payroll_ledger_for_month(
     generated_paths: list[Path] = []
     try:
         db.flush()
+        apply_salary_advance_recoveries(db, advance_recoveries=advance_recoveries)
         company_settings = get_company_settings_for_payslip(db)
         for row in ledger_rows:
             ensure_payslip_pdf(
@@ -766,7 +921,7 @@ def save_payroll_ledger_for_month(
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_locked",
-                f"Payroll for {month_year} has already been saved and locked",
+                "Payroll already approved and locked for this month",
             ),
         ) from exc
     except Exception:
@@ -861,7 +1016,7 @@ def build_employee_payslip_response(
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_unlocked",
-                f"Payroll for {month_year} must be locked before payslips can be generated",
+                "Approve and lock payroll before generating payslips",
             ),
         )
 
@@ -875,7 +1030,7 @@ def build_employee_payslip_response(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=error_detail(
                 "payslip_not_found",
-                f"No locked payslip exists for this employee in {month_year}",
+                "No approved payslip exists for this employee in this month",
             ),
         )
 
@@ -917,6 +1072,15 @@ def download_employee_payslip(
     "/generate/{employee_id}/{month_year}",
     summary="Download a locked employee payslip PDF",
     include_in_schema=False,
+)
+@payslips_router.get(
+    "/generate/{employee_id}/{month_year}",
+    summary="Download a locked employee payslip PDF",
+    include_in_schema=False,
+)
+@payslips_router.get(
+    "/{month_year}/{employee_id}/pdf",
+    summary="Download a locked employee payslip PDF",
 )
 def generate_employee_payslip(
     employee_id: uuid.UUID,
@@ -1018,7 +1182,7 @@ def build_month_payslips_response(
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_unlocked",
-                f"Payroll for {month_year} must be locked before payslips can be exported",
+                "Approve and lock payroll before exporting payslips",
             ),
         )
 
@@ -1059,6 +1223,11 @@ def publish_month_payslips(
     summary="Publish all locked payslips for a month",
     include_in_schema=False,
 )
+@payslips_router.get(
+    "/generate-all/{month_year}",
+    summary="Publish all locked payslips for a month",
+    include_in_schema=False,
+)
 def generate_all_payslips(
     month_year: str,
     db: Annotated[Session, Depends(get_db)],
@@ -1068,3 +1237,16 @@ def generate_all_payslips(
         month_year=month_year,
         db=db,
     )
+
+
+@payslips_router.get(
+    "/{month_year}",
+    response_model=PayrollLedgerRead,
+    summary="Preview locked payslip records for a month",
+)
+def list_month_payslips(
+    month_year: str,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_admin_user)],
+) -> PayrollLedgerRead:
+    return read_payroll_ledger(month_year=month_year, db=db, _=_)

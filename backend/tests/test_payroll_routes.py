@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.database import Base, get_db
 from backend.main import app
-from backend.models import AttendanceEntry, AttendanceStatus, CompanySettings, Employee, PayrollLedger, UserRole
+from backend.models import AttendanceEntry, AttendanceStatus, CompanySettings, Employee, PayrollLedger, SalaryAdvance, UserRole
 from backend.security import get_current_admin_user, get_current_user
 
 
@@ -186,17 +186,38 @@ class PayrollRouteTests(unittest.TestCase):
                     employee_id=self.employee_two_id,
                     work_date=date(2026, 3, 2),
                     status=AttendanceStatus.PRESENT,
-                    hours_logged=Decimal("8.00"),
-                    regular_hours=Decimal("8.00"),
+                    hours_logged=Decimal("6.00"),
+                    regular_hours=Decimal("6.00"),
                 ),
                 self._attendance(
                     employee_id=self.employee_two_id,
                     work_date=date(2026, 3, 3),
+                    status=AttendanceStatus.ABSENT,
+                    hours_logged=Decimal("0.00"),
+                    regular_hours=Decimal("0.00"),
+                ),
+                self._attendance(
+                    employee_id=self.employee_two_id,
+                    work_date=date(2026, 3, 4),
                     status=AttendanceStatus.PRESENT,
                     hours_logged=Decimal("8.00"),
                     regular_hours=Decimal("8.00"),
                 ),
             ])
+            db.add(
+                SalaryAdvance(
+                    employee_id=self.employee_one_id,
+                    amount=Decimal("240.00"),
+                    recovery_months=3,
+                    monthly_deduction=Decimal("80.00"),
+                    recovered_amount=Decimal("0.00"),
+                    start_month_year="03-2026",
+                    start_year=2026,
+                    start_month=3,
+                    notes="Phase 3 recovery",
+                    is_active=True,
+                )
+            )
             db.commit()
 
     def _override_payload(self) -> dict[str, object]:
@@ -215,37 +236,42 @@ class PayrollRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
-        self.assertEqual(body["total_base"], "5600.00")
-        self.assertEqual(body["total_overtime"], "150.00")
-        self.assertEqual(body["total_gross"], "5950.00")
-        self.assertEqual(body["total_deductions"], "975.00")
-        self.assertEqual(body["total_net"], "4975.00")
+        self.assertEqual(body["total_base"], "6400.00")
+        self.assertEqual(body["total_overtime"], "100.00")
+        self.assertEqual(body["total_gross"], "6700.00")
+        self.assertEqual(body["total_deductions"], "1238.33")
+        self.assertEqual(body["total_net"], "5461.67")
 
         overtime_row = next(item for item in body["line_items"] if item["employee_id"] == str(self.employee_one_id))
         self.assertEqual(overtime_row["expected_hours"], "32.00")
         self.assertEqual(overtime_row["hours_logged"], "33.00")
         self.assertEqual(overtime_row["overtime_hours"], "1.00")
+        self.assertEqual(overtime_row["absent_days"], 0)
         self.assertEqual(overtime_row["base_earned"], "3200.00")
-        self.assertEqual(overtime_row["overtime_pay"], "150.00")
+        self.assertEqual(overtime_row["overtime_pay"], "100.00")
         self.assertEqual(overtime_row["bonus"], "200.00")
         self.assertEqual(overtime_row["late_count"], 1)
-        self.assertEqual(overtime_row["late_deductions"], "25.00")
+        self.assertEqual(overtime_row["total_advances"], "180.00")
+        self.assertEqual(overtime_row["absent_deductions"], "0.00")
+        self.assertEqual(overtime_row["late_deductions"], "8.33")
         self.assertEqual(overtime_row["other_fines"], "50.00")
-        self.assertEqual(overtime_row["total_deductions"], "175.00")
-        self.assertEqual(overtime_row["net_pay"], "3375.00")
+        self.assertEqual(overtime_row["total_deductions"], "238.33")
+        self.assertEqual(overtime_row["net_pay"], "3261.67")
 
         shortfall_row = next(item for item in body["line_items"] if item["employee_id"] == str(self.employee_two_id))
-        self.assertEqual(shortfall_row["expected_hours"], "32.00")
-        self.assertEqual(shortfall_row["hours_logged"], "24.00")
-        self.assertEqual(shortfall_row["shortfall_hours"], "8.00")
-        self.assertEqual(shortfall_row["base_earned"], "2400.00")
-        self.assertEqual(shortfall_row["shortfall_deductions"], "800.00")
-        self.assertEqual(shortfall_row["net_pay"], "1600.00")
+        self.assertEqual(shortfall_row["expected_hours"], "24.00")
+        self.assertEqual(shortfall_row["hours_logged"], "22.00")
+        self.assertEqual(shortfall_row["absent_days"], 1)
+        self.assertEqual(shortfall_row["absent_deductions"], "800.00")
+        self.assertEqual(shortfall_row["shortfall_hours"], "2.00")
+        self.assertEqual(shortfall_row["base_earned"], "3200.00")
+        self.assertEqual(shortfall_row["shortfall_deductions"], "200.00")
+        self.assertEqual(shortfall_row["net_pay"], "2200.00")
 
     def test_ledger_persists_across_refresh_and_backend_restart(self) -> None:
         saved = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())
         self.assertEqual(saved.status_code, 201, saved.text)
-        self.assertEqual(saved.json()["total_net"], "4975.00")
+        self.assertEqual(saved.json()["total_net"], "5461.67")
         self.assertEqual(saved.json()["status"], "locked")
         self.assertTrue(saved.json()["is_locked"])
         self.assertIsNotNone(saved.json()["locked_at"])
@@ -268,7 +294,12 @@ class PayrollRouteTests(unittest.TestCase):
         self.assertEqual(summary.json()["status"], "locked")
         self.assertTrue(summary.json()["is_locked"])
         self.assertEqual(summary.json()["locked_payroll_count"], 2)
-        self.assertEqual(summary.json()["total_deductions"], "975.00")
+        self.assertEqual(summary.json()["total_deductions"], "1238.33")
+
+        advances = self.client.get("/api/payroll/advances", params={"employee_id": str(self.employee_one_id)})
+        self.assertEqual(advances.status_code, 200, advances.text)
+        self.assertEqual(advances.json()["items"][0]["monthly_deduction"], "80.00")
+        self.assertEqual(advances.json()["items"][0]["recovered_amount"], "80.00")
 
         self.engine.dispose()
         self._configure_engine()
@@ -278,11 +309,11 @@ class PayrollRouteTests(unittest.TestCase):
         restarted_summary = restarted_client.get("/api/dashboard/monthly-payroll", params={"month": "03-2026"})
 
         self.assertEqual(restarted.status_code, 200, restarted.text)
-        self.assertEqual(restarted.json()["total_net"], "4975.00")
+        self.assertEqual(restarted.json()["total_net"], "5461.67")
         self.assertTrue(restarted.json()["is_locked"])
         self.assertIsNotNone(restarted.json()["locked_at"])
         self.assertEqual(restarted_summary.status_code, 200, restarted_summary.text)
-        self.assertEqual(restarted_summary.json()["total_base"], "5600.00")
+        self.assertEqual(restarted_summary.json()["total_base"], "6400.00")
 
     def test_payslip_pdf_and_zip_persist_across_restart(self) -> None:
         saved = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())
@@ -307,6 +338,21 @@ class PayrollRouteTests(unittest.TestCase):
         self.assertEqual(duplicate_download.status_code, 200, duplicate_download.text)
         self.assertEqual(pdf_path.read_bytes(), first_bytes)
 
+        payslip_preview = self.client.get("/api/payslips/03-2026")
+        payslip_pdf_download = self.client.get(
+            f"/api/payslips/03-2026/{first_item['employee_id']}/pdf"
+        )
+        legacy_payslip_pdf_download = self.client.get(
+            f"/api/payslips/generate/{first_item['employee_id']}/03-2026"
+        )
+
+        self.assertEqual(payslip_preview.status_code, 200, payslip_preview.text)
+        self.assertEqual(payslip_preview.json()["total_net"], saved.json()["total_net"])
+        self.assertEqual(payslip_pdf_download.status_code, 200, payslip_pdf_download.text)
+        self.assertEqual(payslip_pdf_download.content, first_bytes)
+        self.assertEqual(legacy_payslip_pdf_download.status_code, 200, legacy_payslip_pdf_download.text)
+        self.assertEqual(legacy_payslip_pdf_download.content, first_bytes)
+
         zip_download = self.client.get("/api/receipts/generate-all/03-2026")
         self.assertEqual(zip_download.status_code, 200, zip_download.text)
         self.assertEqual(zip_download.headers["content-type"], "application/zip")
@@ -317,6 +363,10 @@ class PayrollRouteTests(unittest.TestCase):
                 ["payslip-03-2026-EMP001.pdf", "payslip-03-2026-EMP002.pdf"],
             )
             self.assertTrue(archive.read(names[0]).startswith(b"%PDF"))
+
+        payslip_zip_download = self.client.get("/api/payslips/generate-all/03-2026")
+        self.assertEqual(payslip_zip_download.status_code, 200, payslip_zip_download.text)
+        self.assertEqual(payslip_zip_download.content, zip_download.content)
 
         refreshed = self.client.get("/api/payroll/ledger/03-2026")
         self.assertEqual(refreshed.status_code, 200, refreshed.text)
@@ -373,7 +423,7 @@ class PayrollRouteTests(unittest.TestCase):
             self.assertTrue(all(row.is_locked for row in rows))
             self.assertTrue(all(row.locked_at is not None for row in rows))
             self.assertTrue(all(row.finalized_at is not None for row in rows))
-            self.assertEqual(sum((row.net_pay for row in rows), Decimal("0.00")), Decimal("4975.00"))
+            self.assertEqual(sum((row.net_pay for row in rows), Decimal("0.00")), Decimal("5461.67"))
 
     def test_payroll_error_responses_are_stable_json(self) -> None:
         invalid_month = self.client.post("/api/payroll/preview/13-2026")

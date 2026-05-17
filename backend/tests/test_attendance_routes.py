@@ -118,6 +118,7 @@ class AttendanceRouteTests(unittest.TestCase):
 
         refreshed = self.client.get("/api/attendance/", params={"date": "2026-05-16"})
         self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(refreshed.history, [])
         self.assertEqual(refreshed.json()["items"][0]["id"], created_body["id"])
 
         self.engine.dispose()

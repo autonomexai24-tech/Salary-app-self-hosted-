@@ -6,6 +6,7 @@ const configuredBaseUrl = (
 
 export const API_BASE_URL = configuredBaseUrl.replace(/\/+$/, "");
 export const AUTH_TOKEN_KEY = "payroll_auth_token";
+export const AUTH_UNAUTHORIZED_EVENT = "payroll-auth-unauthorized";
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 
@@ -89,6 +90,15 @@ export function clearStoredAuthToken(): void {
   }
 }
 
+function notifyUnauthorized(): void {
+  clearStoredAuthToken();
+  try {
+    window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT));
+  } catch {
+    // Ignore event dispatch failures outside a browser context.
+  }
+}
+
 export async function apiRequest(path: string, options: ApiRequestOptions = {}): Promise<Response> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -108,7 +118,10 @@ export async function apiRequest(path: string, options: ApiRequestOptions = {}):
       signal: controller.signal,
     });
 
-    if (!response.ok) throw await parseErrorResponse(response);
+    if (!response.ok) {
+      if (response.status === 401) notifyUnauthorized();
+      throw await parseErrorResponse(response);
+    }
     return response;
   } catch (error) {
     if (error instanceof ApiError) throw error;

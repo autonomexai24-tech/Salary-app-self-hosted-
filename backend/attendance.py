@@ -106,7 +106,7 @@ def ensure_attendance_month_unlocked(db: Session, work_date: date_type) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail=error_detail(
                 "payroll_period_locked",
-                f"Attendance for {month_year} is locked because payroll has already been saved",
+                "Attendance cannot be edited because payroll is approved and locked for this month",
             ),
         )
 
@@ -163,6 +163,7 @@ def attendance_entry_response(
     )
 
 
+@router.get("/", response_model=AttendanceEntryList, summary="List attendance entries for a day", include_in_schema=False)
 @router.get("", response_model=AttendanceEntryList, summary="List attendance entries for a day")
 def list_attendance_entries(
     attendance_date: Annotated[date_type, Query(alias="date")],
@@ -211,6 +212,12 @@ def read_attendance_entry(
 
 @router.post(
     "/log",
+    response_model=AttendanceEntryRead,
+    summary="Create or update daily attendance",
+    include_in_schema=False,
+)
+@router.post(
+    "/",
     response_model=AttendanceEntryRead,
     summary="Create or update daily attendance",
     include_in_schema=False,

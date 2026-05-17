@@ -30,7 +30,9 @@ class PayrollEmployee:
     department: str
     designation: str
     monthly_basic: Decimal
+    daily_rate: Decimal
     hourly_rate: Decimal
+    minute_rate: Decimal
     working_days_per_month: Decimal
     working_hours_per_day: Decimal
     leave_balance: Decimal
@@ -70,6 +72,7 @@ class PayrollPreviewLine:
     department: str
     designation: str
     days_present: int
+    absent_days: int
     expected_hours: Decimal
     hours_logged: Decimal
     regular_hours: Decimal
@@ -82,6 +85,7 @@ class PayrollPreviewLine:
     bonus: Decimal
     gross_pay: Decimal
     total_advances: Decimal
+    absent_deductions: Decimal
     late_deductions: Decimal
     shortfall_deductions: Decimal
     other_fines: Decimal
@@ -127,8 +131,9 @@ def parse_month_year(value: str) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last_day)
 
 
-def expected_hours_for_employee(employee: PayrollEmployee) -> Decimal:
-    return hours(employee.working_days_per_month * employee.working_hours_per_day)
+def expected_hours_for_employee(employee: PayrollEmployee, payable_days: int | None = None) -> Decimal:
+    days = Decimal(payable_days) if payable_days is not None else employee.working_days_per_month
+    return hours(days * employee.working_hours_per_day)
 
 
 def override_map(
@@ -157,34 +162,36 @@ def calculate_employee_line(
     *,
     policy: PayrollPolicy,
     override: PayrollManualOverride | None,
+    advance_recovery: Decimal = Decimal("0.00"),
 ) -> PayrollPreviewLine:
-    expected_hours = expected_hours_for_employee(employee)
-    logged_hours = hours(sum((log.hours_logged for log in employee_logs), Decimal("0.00")))
-    overtime_hours = hours(max(Decimal("0.00"), logged_hours - expected_hours))
-    regular_hours = hours(min(logged_hours, expected_hours))
-    shortfall_hours = hours(max(Decimal("0.00"), expected_hours - logged_hours))
-    days_present = sum(int(log.status in PAYABLE_ATTENDANCE_STATUSES) for log in employee_logs)
+    payable_logs = [log for log in employee_logs if log.status in PAYABLE_ATTENDANCE_STATUSES]
+    days_present = len(payable_logs)
+    absent_days = sum(int(log.status == AttendanceStatus.ABSENT) for log in employee_logs)
     leave_days = sum(int(log.status == AttendanceStatus.LEAVE) for log in employee_logs)
-    late_logs = [log for log in employee_logs if log.status == AttendanceStatus.LATE]
+    expected_hours = expected_hours_for_employee(employee, days_present)
+    logged_hours = hours(sum((log.hours_logged for log in payable_logs), Decimal("0.00")))
+    regular_hours = hours(sum((min(log.hours_logged, employee.working_hours_per_day) for log in payable_logs), Decimal("0.00")))
+    overtime_hours = hours(sum((max(Decimal("0.00"), log.hours_logged - employee.working_hours_per_day) for log in payable_logs), Decimal("0.00")))
+    shortfall_hours = hours(sum((max(Decimal("0.00"), employee.working_hours_per_day - log.hours_logged) for log in payable_logs), Decimal("0.00")))
+    late_logs = [log for log in payable_logs if log.status == AttendanceStatus.LATE]
     late_count = len(late_logs)
     late_minutes = sum(log.late_minutes for log in late_logs)
     bonus = money(override.bonus if override is not None else Decimal("0.00"))
     other_fines = money(override.other_fines if override is not None else Decimal("0.00"))
 
-    if expected_hours > 0:
-        base_earned = money(min(employee.monthly_basic, (logged_hours / expected_hours) * employee.monthly_basic))
-    else:
-        base_earned = Decimal("0.00")
+    base_earned = money(employee.monthly_basic)
 
-    overtime_pay = money(overtime_hours * employee.hourly_rate * policy.overtime_multiplier)
+    overtime_pay = money(overtime_hours * employee.hourly_rate)
     gross_pay = money(base_earned + overtime_pay + bonus)
-    total_advances = money(sum((log.advance_amount for log in employee_logs), Decimal("0.00")))
+    attendance_advances = sum((log.advance_amount for log in employee_logs), Decimal("0.00"))
+    total_advances = money(attendance_advances + advance_recovery)
+    absent_deductions = money(Decimal(absent_days) * employee.daily_rate)
     if policy.late_penalty_per_minute > 0:
         late_deductions = money(Decimal(late_minutes) * policy.late_penalty_per_minute)
     else:
-        late_deductions = money(sum((log.penalty_amount for log in late_logs), Decimal("0.00")))
+        late_deductions = money(employee.hourly_rate * Decimal(late_minutes) / Decimal("60"))
     shortfall_deductions = money(shortfall_hours * employee.hourly_rate)
-    total_penalties = money(late_deductions + shortfall_deductions + other_fines)
+    total_penalties = money(absent_deductions + late_deductions + shortfall_deductions + other_fines)
     total_deductions = money(total_penalties + total_advances)
     net_pay = money(max(Decimal("0.00"), gross_pay - total_deductions))
 
@@ -195,6 +202,7 @@ def calculate_employee_line(
         department=employee.department,
         designation=employee.designation,
         days_present=days_present,
+        absent_days=absent_days,
         expected_hours=expected_hours,
         hours_logged=logged_hours,
         regular_hours=regular_hours,
@@ -207,6 +215,7 @@ def calculate_employee_line(
         bonus=bonus,
         gross_pay=gross_pay,
         total_advances=total_advances,
+        absent_deductions=absent_deductions,
         late_deductions=late_deductions,
         shortfall_deductions=shortfall_deductions,
         other_fines=other_fines,
@@ -224,18 +233,21 @@ def calculate_payroll_preview(
     period_end: date,
     policy: PayrollPolicy,
     overrides: list[PayrollManualOverride] | None = None,
+    advance_recoveries: dict[uuid.UUID, Decimal] | None = None,
 ) -> PayrollPreview:
     if period_end < period_start:
         raise ValueError("Period end must be on or after period start")
 
     grouped_logs = logs_by_employee(logs, period_start=period_start, period_end=period_end)
     overrides_by_employee = override_map(overrides)
+    recoveries = advance_recoveries or {}
     line_items = [
         calculate_employee_line(
             employee,
             grouped_logs[employee.employee_id],
             policy=policy,
             override=overrides_by_employee.get(employee.employee_id),
+            advance_recovery=recoveries.get(employee.employee_id, Decimal("0.00")),
         )
         for employee in employees
         if employee.employee_id in grouped_logs

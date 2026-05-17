@@ -835,6 +835,52 @@ class AttendanceEntryList(BaseModel):
     total: int
 
 
+class SalaryAdvanceCreate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    employee_id: uuid.UUID = Field(validation_alias=AliasChoices("employee_id", "employeeId"))
+    amount: Decimal = Field(..., gt=0, max_digits=14, decimal_places=2)
+    recovery_months: int = Field(..., gt=0, le=120, validation_alias=AliasChoices("recovery_months", "recoveryMonths"))
+    start_month_year: str = Field(
+        ...,
+        min_length=7,
+        max_length=7,
+        validation_alias=AliasChoices("start_month_year", "startMonthYear", "month_year", "monthYear"),
+    )
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("start_month_year")
+    @classmethod
+    def validate_start_month_year(cls, value: str) -> str:
+        month_year = value.strip()
+        parse_month_year(month_year)
+        return month_year
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, value: str | None) -> str | None:
+        return normalize_optional_text(value)
+
+
+class SalaryAdvanceRead(BaseModel):
+    id: uuid.UUID
+    employee_id: uuid.UUID
+    amount: Decimal
+    recovery_months: int
+    monthly_deduction: Decimal
+    recovered_amount: Decimal
+    start_month_year: str
+    notes: str | None = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class SalaryAdvanceList(BaseModel):
+    items: list[SalaryAdvanceRead]
+    total: int
+
+
 class PayrollPreviewLineRead(BaseModel):
     employee_id: uuid.UUID
     employee_code: str
@@ -842,6 +888,7 @@ class PayrollPreviewLineRead(BaseModel):
     department: str
     designation: str
     days_present: int
+    absent_days: int
     expected_hours: Decimal
     hours_logged: Decimal
     regular_hours: Decimal
@@ -854,6 +901,7 @@ class PayrollPreviewLineRead(BaseModel):
     bonus: Decimal
     gross_pay: Decimal
     total_advances: Decimal
+    absent_deductions: Decimal
     late_deductions: Decimal
     shortfall_deductions: Decimal
     other_fines: Decimal
@@ -922,6 +970,7 @@ class PayrollLedgerLineRead(BaseModel):
     department: str
     designation: str
     days_present: int
+    absent_days: int
     expected_hours: Decimal
     hours_logged: Decimal
     regular_hours: Decimal
@@ -934,6 +983,7 @@ class PayrollLedgerLineRead(BaseModel):
     bonus: Decimal
     gross_pay: Decimal
     total_advances: Decimal
+    absent_deductions: Decimal
     late_deductions: Decimal
     shortfall_deductions: Decimal
     other_fines: Decimal

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from "react";
 import {
+  AUTH_UNAUTHORIZED_EVENT,
   clearStoredAuthToken,
   getCurrentUser,
   getStoredAuthToken,
@@ -20,6 +21,7 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   isAdmin: boolean;
+  isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -51,7 +53,8 @@ function clearStoredUser(): void {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(() => readStoredUser());
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,13 +62,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const storedUser = readStoredUser();
     if (storedUser?.id === "offline-admin") {
-      setUser(storedUser);
-      return () => { cancelled = true; };
+      clearStoredAuthToken();
+      clearStoredUser();
+      setUser(null);
+      setIsLoading(false);
+      return () => {
+        cancelled = true;
+      };
     }
 
     if (!token) {
       clearStoredUser();
       setUser(null);
+      setIsLoading(false);
       return () => {
         cancelled = true;
       };
@@ -82,6 +91,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearStoredAuthToken();
         clearStoredUser();
         setUser(null);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
       });
 
     return () => {
@@ -89,20 +101,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      clearStoredUser();
+      setUser(null);
+      setIsLoading(false);
+    };
+
+    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, handleUnauthorized);
+    return () => {
+      window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, handleUnauthorized);
+    };
+  }, []);
+
   const login = useCallback(async (email: string, password: string) => {
-    try {
-      const apiUser = await loginWithPassword(email, password);
-      setUser(apiUser);
-      storeUser(apiUser);
-    } catch (error) {
-      if (email === "resume" && password === "resume123") {
-        const offlineUser: AuthUser = { id: "offline-admin", name: "Admin", role: "admin" };
-        setUser(offlineUser);
-        storeUser(offlineUser);
-        return;
-      }
-      throw error;
-    }
+    const apiUser = await loginWithPassword(email, password);
+    setUser(apiUser);
+    storeUser(apiUser);
   }, []);
 
   const logout = useCallback(() => {
@@ -112,7 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, isAdmin: user?.role === "admin" }}>
+    <AuthContext.Provider value={{ user, login, logout, isAdmin: user?.role === "admin", isLoading }}>
       {children}
     </AuthContext.Provider>
   );

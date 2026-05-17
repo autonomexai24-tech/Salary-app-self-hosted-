@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
@@ -39,6 +39,7 @@ except ImportError:
 
 
 router = APIRouter(prefix="/employees", tags=["employees"])
+SERIALIZATION_FALLBACK_DATETIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def error_detail(code: str, message: str) -> dict[str, str]:
@@ -161,6 +162,46 @@ def apply_calculated_rates(
     employee.minute_rate = rates.minute_rate
 
 
+def non_negative_decimal(value: Decimal | None, fallback: str = "0.00") -> Decimal:
+    if value is None or value < 0:
+        return Decimal(fallback)
+    return value
+
+
+def positive_decimal(value: Decimal | None, fallback: str) -> Decimal:
+    if value is None or value <= 0:
+        return Decimal(fallback)
+    return value
+
+
+def non_empty_text(value: str | None, fallback: str) -> str:
+    normalized = " ".join((value or "").strip().split())
+    return normalized or fallback
+
+
+def employee_response(employee: Employee) -> EmployeeRead:
+    created_at = employee.created_at or SERIALIZATION_FALLBACK_DATETIME
+    return EmployeeRead(
+        id=employee.id,
+        employee_code=non_empty_text(employee.employee_code, f"EMP-{employee.id}"),
+        full_name=non_empty_text(employee.full_name, "Unnamed Employee"),
+        phone_number=employee.phone_number,
+        department=non_empty_text(employee.department, "Unassigned"),
+        designation=non_empty_text(employee.designation, "Unassigned"),
+        monthly_basic=non_negative_decimal(employee.monthly_basic),
+        joining_date=employee.joining_date or created_at.date(),
+        working_days_per_month=positive_decimal(employee.working_days_per_month, "30.00"),
+        working_hours_per_day=positive_decimal(employee.working_hours_per_day, "8.00"),
+        leave_balance=non_negative_decimal(employee.leave_balance),
+        daily_rate=non_negative_decimal(employee.daily_rate),
+        hourly_rate=non_negative_decimal(employee.hourly_rate),
+        minute_rate=non_negative_decimal(employee.minute_rate),
+        is_active=bool(employee.is_active),
+        created_at=created_at,
+        updated_at=employee.updated_at or created_at,
+    )
+
+
 @router.post(
     "/rates/preview",
     response_model=EmployeeRatePreviewRead,
@@ -183,6 +224,13 @@ def preview_employee_rates(
 
 
 @router.post(
+    "/",
+    response_model=EmployeeRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an employee",
+    include_in_schema=False,
+)
+@router.post(
     "",
     response_model=EmployeeRead,
     status_code=status.HTTP_201_CREATED,
@@ -193,7 +241,7 @@ def create_employee(
     response: Response,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
-) -> Employee:
+) -> EmployeeRead:
     validate_employee_references(
         db,
         department=payload.department,
@@ -231,9 +279,10 @@ def create_employee(
 
     db.refresh(employee)
     response.headers["Location"] = f"/employees/{employee.id}"
-    return employee
+    return employee_response(employee)
 
 
+@router.get("/", response_model=EmployeeList, summary="List employees", include_in_schema=False)
 @router.get("", response_model=EmployeeList, summary="List employees")
 def list_employees(
     db: Annotated[Session, Depends(get_db)],
@@ -284,7 +333,12 @@ def list_employees(
 
     total = db.scalar(total_statement) or 0
     employees = db.scalars(employee_statement.limit(limit).offset(offset)).all()
-    return EmployeeList(items=list(employees), limit=limit, offset=offset, total=total)
+    return EmployeeList(
+        items=[employee_response(employee) for employee in employees],
+        limit=limit,
+        offset=offset,
+        total=total,
+    )
 
 
 @router.get("/{employee_id}", response_model=EmployeeRead, summary="Read an employee")
@@ -292,8 +346,8 @@ def read_employee(
     employee_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-) -> Employee:
-    return get_employee_or_404(db, employee_id)
+) -> EmployeeRead:
+    return employee_response(get_employee_or_404(db, employee_id))
 
 
 @router.patch("/{employee_id}", response_model=EmployeeRead, summary="Update an employee")
@@ -302,7 +356,7 @@ def update_employee(
     payload: EmployeeUpdate,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
-) -> Employee:
+) -> EmployeeRead:
     employee = get_employee_or_404(db, employee_id)
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
 
@@ -338,7 +392,7 @@ def update_employee(
         raise_employee_code_conflict()
 
     db.refresh(employee)
-    return employee
+    return employee_response(employee)
 
 
 @router.delete("/{employee_id}", response_model=EmployeeRead, summary="Deactivate an employee")
@@ -346,13 +400,13 @@ def deactivate_employee(
     employee_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
-) -> Employee:
+) -> EmployeeRead:
     employee = get_employee_or_404(db, employee_id)
     employee.is_active = False
     employee.updated_at = utc_now()
     db.commit()
     db.refresh(employee)
-    return employee
+    return employee_response(employee)
 
 
 @router.post("/{employee_id}/restore", response_model=EmployeeRead, summary="Restore an employee")
@@ -360,10 +414,10 @@ def restore_employee(
     employee_id: uuid.UUID,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(get_current_admin_user)],
-) -> Employee:
+) -> EmployeeRead:
     employee = get_employee_or_404(db, employee_id)
     employee.is_active = True
     employee.updated_at = utc_now()
     db.commit()
     db.refresh(employee)
-    return employee
+    return employee_response(employee)
