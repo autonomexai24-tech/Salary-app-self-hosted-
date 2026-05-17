@@ -16,9 +16,31 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_LOCAL_CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
+    "http://localhost:5177",
+    "http://127.0.0.1:5177",
+    "http://localhost:5178",
+    "http://127.0.0.1:5178",
+    "http://localhost:5179",
+    "http://127.0.0.1:5179",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:8082",
+    "http://127.0.0.1:8082",
+    "http://localhost:8083",
+    "http://127.0.0.1:8083",
 ]
+DEFAULT_LOCAL_CORS_ORIGIN_REGEX = (
+    r"^http://(localhost|127\.0\.0\.1):"
+    r"(3000|4173|51[7-9][0-9]|80[0-9][0-9])$"
+)
 DEFAULT_DATABASE_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/payroll_os"
 INSECURE_SECRET_VALUES = {
     "dev-only-replace-this-jwt-secret-before-production",
@@ -66,6 +88,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ORIGINS", "ALLOWED_ORIGINS"),
     )
     frontend_url: str = Field(default="", validation_alias="FRONTEND_URL")
+    app_base_url: str = Field(default="", validation_alias="APP_BASE_URL")
     db_pool_size: int = Field(default=5, ge=1, le=50)
     db_max_overflow: int = Field(default=10, ge=0, le=100)
     db_pool_recycle_seconds: int = Field(default=1800, ge=60, le=86400)
@@ -144,10 +167,10 @@ class Settings(BaseSettings):
                 raise ValueError("JWT_SECRET_KEY must be replaced in production")
             if not self.allowed_origins.strip():
                 raise ValueError("CORS_ORIGINS is required in production")
-            if not self.frontend_url.strip():
-                raise ValueError("FRONTEND_URL is required in production")
+            if not self.frontend_url.strip() and not self.app_base_url.strip():
+                raise ValueError("FRONTEND_URL or APP_BASE_URL is required in production")
             if not origins or "*" in origins:
-                raise ValueError("CORS_ORIGINS or FRONTEND_URL must list explicit origins in production")
+                raise ValueError("CORS_ORIGINS, FRONTEND_URL, or APP_BASE_URL must list explicit origins in production")
             if not self.upload_dir.is_absolute():
                 raise ValueError("UPLOAD_PATH or UPLOAD_DIR must be an absolute path in production")
         return self
@@ -161,6 +184,9 @@ class Settings(BaseSettings):
         frontend_origin = self.frontend_url.strip().rstrip("/")
         if frontend_origin and frontend_origin not in configured:
             configured.append(frontend_origin)
+        app_base_origin = self.app_base_url.strip().rstrip("/")
+        if app_base_origin and app_base_origin not in configured:
+            configured.append(app_base_origin)
         return configured
 
     @property
@@ -171,6 +197,12 @@ class Settings(BaseSettings):
         if not origins or "*" in origins:
             return DEFAULT_LOCAL_CORS_ORIGINS
         return origins
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        if self.is_production:
+            return None
+        return DEFAULT_LOCAL_CORS_ORIGIN_REGEX
 
     @property
     def is_production(self) -> bool:

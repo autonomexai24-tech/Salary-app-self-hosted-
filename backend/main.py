@@ -46,16 +46,18 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
 app.mount(
-    settings.public_logo_url_path,
-    StaticFiles(directory=upload_dir / "logos"),
-    name="upload_logos",
+    settings.normalized_upload_url_path,
+    StaticFiles(directory=upload_dir),
+    name="uploads",
 )
 app.include_router(auth_router, prefix=API_PREFIX)
 app.include_router(users_router, prefix=API_PREFIX)

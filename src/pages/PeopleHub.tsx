@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Search, UserPlus, Zap, Phone, User, Save } from "lucide-react";
-import CompanySettings from "@/components/CompanySettings";
+import PeopleHubSettings from "@/components/PeopleHubSettings";
 import {
   apiErrorMessage,
   createEmployee,
@@ -186,18 +186,18 @@ export default function PeopleHub() {
     <div className="p-6 max-w-5xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">People Hub</h1>
-        <p className="text-sm text-muted-foreground mt-1">Manage employees, designations, and company settings.</p>
+        <p className="text-sm text-muted-foreground mt-1">Manage employees, departments, designations, shifts, leave rules, and holidays.</p>
       </div>
 
       <Tabs defaultValue="directory">
         <TabsList className="grid w-full max-w-md grid-cols-2">
           <TabsTrigger value="directory">Employee Directory</TabsTrigger>
-          <TabsTrigger value="settings">Company Settings</TabsTrigger>
+          <TabsTrigger value="settings">Workforce Settings</TabsTrigger>
         </TabsList>
 
-        {/* ===================== COMPANY SETTINGS TAB ===================== */}
+        {/* ===================== WORKFORCE SETTINGS TAB ===================== */}
         <TabsContent value="settings" className="mt-6">
-          <CompanySettings
+          <PeopleHubSettings
             designations={designations}
             setDesignations={setDesignations}
             departments={departments}

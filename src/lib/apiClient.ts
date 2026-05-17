@@ -1,7 +1,5 @@
 const configuredBaseUrl = (
-  import.meta.env.VITE_API_URL ??
-  import.meta.env.VITE_API_BASE_URL ??
-  ""
+  import.meta.env.VITE_API_BASE_URL ?? ""
 ).trim();
 
 export const API_BASE_URL = configuredBaseUrl.replace(/\/+$/, "");
@@ -38,6 +36,18 @@ function normalizePath(path: string): string {
 function buildUrl(path: string): string {
   if (/^https?:\/\//i.test(path)) return path;
   return `${API_BASE_URL}${normalizePath(path)}`;
+}
+
+function describeApiTarget(): string {
+  return API_BASE_URL || "same-origin /api";
+}
+
+function describeFrontendOrigin(): string {
+  try {
+    return window.location.origin;
+  } catch {
+    return "this frontend origin";
+  }
 }
 
 function apiMessageFromDetail(detail: unknown, fallback: string): { message: string; code?: string } {
@@ -126,10 +136,16 @@ export async function apiRequest(path: string, options: ApiRequestOptions = {}):
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new ApiError("The backend took too long to respond. Please try again.", 0, "request_timeout");
+      throw new ApiError(
+        `The backend at ${describeApiTarget()} took too long to respond. Retry after the API finishes restarting.`,
+        0,
+        "request_timeout"
+      );
     }
     throw new ApiError(
-      "Could not reach the backend. Check that the API is running and that CORS allows this frontend.",
+      `Backend request failed before a response was received. API target: ${describeApiTarget()}. ` +
+        `Check that FastAPI or the reverse proxy is running, VITE_API_BASE_URL points to the active backend, ` +
+        `and CORS_ORIGINS/FRONTEND_URL includes ${describeFrontendOrigin()}.`,
       0,
       "network_error"
     );

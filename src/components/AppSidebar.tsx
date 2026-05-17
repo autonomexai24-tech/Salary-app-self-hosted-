@@ -1,6 +1,5 @@
 import { CalendarDays, Users, Calculator, FileText, Settings } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
-import { useLocation } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   Sidebar,
@@ -17,6 +16,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { LogOut } from "lucide-react";
+import { logBrandingAssetMissing, useBranding } from "@/contexts/BrandingContext";
 
 const allNavItems = [
   { title: "Daily Log", url: "/", icon: CalendarDays, roles: ["admin", "operator"] as const },
@@ -29,8 +29,8 @@ const allNavItems = [
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
-  const location = useLocation();
   const { user, logout } = useAuth();
+  const { companyName, logoUrl } = useBranding();
 
   const visibleItems = allNavItems.filter(item => user && (item.roles as readonly string[]).includes(user.role));
 
@@ -39,12 +39,12 @@ export function AppSidebar() {
       <SidebarHeader className="p-4">
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground text-sm font-bold">
-            P
+            {logoUrl ? <img src={logoUrl} alt="Company logo" className="max-h-6 max-w-6 object-contain" onError={() => logBrandingAssetMissing(logoUrl)} /> : companyName.charAt(0)}
           </div>
           {!collapsed && (
             <div className="flex flex-col">
-              <span className="text-sm font-semibold text-sidebar-foreground">Salary & Advance</span>
-              <span className="text-[11px] text-sidebar-foreground/60">Tracker</span>
+              <span className="text-sm font-semibold text-sidebar-foreground truncate max-w-[150px]">{companyName}</span>
+              <span className="text-[11px] text-sidebar-foreground/60">Payroll</span>
             </div>
           )}
         </div>

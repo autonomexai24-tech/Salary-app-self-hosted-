@@ -65,4 +65,14 @@ describe("apiRequest authentication", () => {
     expect(listener).toHaveBeenCalledTimes(1);
     window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, listener);
   });
+
+  it("returns actionable configuration details for network failures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+
+    await expect(apiRequest("/api/settings/")).rejects.toMatchObject({
+      status: 0,
+      code: "network_error",
+      message: expect.stringContaining("VITE_API_BASE_URL"),
+    });
+  });
 });

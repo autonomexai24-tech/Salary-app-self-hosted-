@@ -36,7 +36,7 @@ Run the frontend:
 npm run dev
 ```
 
-The Vite dev app uses same-origin API paths by default. Override it with `VITE_API_URL` or `VITE_API_BASE_URL` if needed.
+The Vite dev app uses same-origin API paths by default and proxies `/api` plus `/uploads` to `http://127.0.0.1:8000`. Override the browser API target with `VITE_API_BASE_URL` only when the frontend is served from a different host.
 
 ## Easypanel Deployment
 
@@ -59,6 +59,7 @@ DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST:5432/DB_NAME
 JWT_SECRET_KEY=<random-long-secret-at-least-32-characters>
 CORS_ORIGINS=https://your-app-domain.example
 FRONTEND_URL=https://your-app-domain.example
+APP_BASE_URL=https://your-app-domain.example
 UPLOAD_PATH=/app/backend/uploads
 UPLOAD_URL_PATH=/uploads
 ```

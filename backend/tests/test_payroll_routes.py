@@ -5,7 +5,7 @@ import unittest
 import uuid
 import zipfile
 from io import BytesIO
-from datetime import date, time
+from datetime import date, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.database import Base, get_db
 from backend.main import app
-from backend.models import AttendanceEntry, AttendanceStatus, CompanySettings, Employee, PayrollLedger, SalaryAdvance, UserRole
+from backend.models import AttendanceEntry, AttendanceStatus, CompanySettings, Employee, PayrollLedger, SalaryAdvance, UserRole, utc_now
 from backend.security import get_current_admin_user, get_current_user
 
 
@@ -387,6 +387,38 @@ class PayrollRouteTests(unittest.TestCase):
         self.assertEqual(restarted_pdf.content, first_bytes)
         self.assertEqual(restarted_zip.status_code, 200, restarted_zip.text)
         self.assertEqual(restarted_zip.content, zip_path.read_bytes())
+
+    def test_payslip_pdf_and_zip_refresh_when_branding_changes(self) -> None:
+        saved = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())
+        self.assertEqual(saved.status_code, 201, saved.text)
+        first_item = saved.json()["items"][0]
+        pdf_path = self.upload_dir / first_item["payslip_pdf_path"]
+        original_pdf_bytes = pdf_path.read_bytes()
+
+        first_zip = self.client.get("/api/receipts/generate-all/03-2026")
+        self.assertEqual(first_zip.status_code, 200, first_zip.text)
+
+        with self.SessionLocal() as db:
+            settings = db.get(CompanySettings, 1)
+            self.assertIsNotNone(settings)
+            settings.company_name = "Updated Branding Company"
+            settings.updated_at = utc_now() + timedelta(seconds=5)
+            db.commit()
+
+        refreshed_pdf = self.client.get(
+            f"/api/receipts/generate/{first_item['employee_id']}/03-2026"
+        )
+        self.assertEqual(refreshed_pdf.status_code, 200, refreshed_pdf.text)
+        self.assertNotEqual(refreshed_pdf.content, original_pdf_bytes)
+        self.assertEqual(pdf_path.read_bytes(), refreshed_pdf.content)
+
+        refreshed_zip = self.client.get("/api/receipts/generate-all/03-2026")
+        self.assertEqual(refreshed_zip.status_code, 200, refreshed_zip.text)
+        with zipfile.ZipFile(BytesIO(refreshed_zip.content)) as archive:
+            self.assertEqual(
+                archive.read("payslip-03-2026-EMP001.pdf"),
+                refreshed_pdf.content,
+            )
 
     def test_locked_payroll_blocks_attendance_edits_and_recalculation(self) -> None:
         locked = self.client.post("/api/payroll/lock/03-2026", json=self._override_payload())

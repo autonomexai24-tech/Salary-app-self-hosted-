@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import uuid
+import logging
 from datetime import date as date_type
 from email.parser import BytesParser
 from email.policy import default as email_policy
+from io import BytesIO
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from reportlab.lib.utils import ImageReader
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -52,6 +55,8 @@ except ImportError:
 
 COMPANY_SETTINGS_ID = 1
 DEFAULT_COMPANY_NAME = "Your Company"
+BRANDING_FIELDS = {"company_name", "address", "phone", "email", "tax_id"}
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 company_settings_alias_router = APIRouter(prefix="/company-settings", tags=["company-settings"])
@@ -93,6 +98,10 @@ def logo_url(logo_path: str | None) -> str | None:
     if not logo_path:
         return None
     return f"{get_settings().normalized_upload_url_path}/{logo_path}"
+
+
+def upload_root() -> Path:
+    return get_settings().resolved_upload_dir
 
 
 def settings_response(settings_record: CompanySettings) -> CompanySettingsRead:
@@ -169,9 +178,22 @@ def detect_logo_format(content: bytes) -> tuple[str, str] | None:
         return "image/png", ".png"
     if content.startswith(b"\xff\xd8\xff"):
         return "image/jpeg", ".jpg"
-    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-        return "image/webp", ".webp"
     return None
+
+
+def ensure_logo_pdf_renderable(content: bytes) -> None:
+    try:
+        image = ImageReader(BytesIO(content))
+        image.getSize()
+        image.getRGBData()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_detail(
+                "unsupported_logo_type",
+                "Logo file could not be decoded for PDF rendering",
+            ),
+        ) from exc
 
 
 def extract_multipart_file(content_type: str | None, body: bytes) -> bytes:
@@ -205,13 +227,13 @@ def extract_multipart_file(content_type: str | None, body: bytes) -> bytes:
 
 
 def logo_directory() -> Path:
-    directory = get_settings().upload_dir / "logos"
+    directory = upload_root() / "logos"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
 def resolve_upload_path(relative_path: str) -> Path | None:
-    upload_dir = get_settings().upload_dir.resolve()
+    upload_dir = upload_root()
     candidate = (upload_dir / relative_path).resolve()
     try:
         candidate.relative_to(upload_dir)
@@ -226,15 +248,54 @@ def remove_logo_file(relative_path: str | None) -> None:
 
     logo_path = resolve_upload_path(relative_path)
     if logo_path is not None and logo_path.is_file():
-        logo_path.unlink()
+        try:
+            logo_path.unlink()
+        except OSError as exc:
+            logger.warning("Could not remove old logo file %s: %s", logo_path, exc)
 
 
 def remove_old_logo_variants(keep_path: Path) -> None:
     for candidate in logo_directory().glob("company-logo.*"):
         if candidate != keep_path and candidate.is_file():
-            candidate.unlink()
+            try:
+                candidate.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove old logo variant %s: %s", candidate, exc)
 
 
+def write_bytes_atomically(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_bytes(content)
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def refresh_branding_artifacts(db: Session, settings_record: CompanySettings) -> None:
+    try:
+        try:
+            from .payroll import refresh_payslip_artifacts_for_branding_change
+        except ImportError:
+            from payroll import refresh_payslip_artifacts_for_branding_change
+
+        refresh_payslip_artifacts_for_branding_change(db, settings_record)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to refresh payslip artifacts after branding change", exc_info=exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_detail(
+                "pdf_branding_render_failed",
+                "PDF branding render failed while refreshing existing payslips",
+            ),
+        ) from exc
+
+
+@router.get("/", response_model=CompanySettingsRead, summary="Read company settings", include_in_schema=False)
 @router.get("", response_model=CompanySettingsRead, summary="Read company settings")
 def read_company_settings(
     db: Annotated[Session, Depends(get_db)],
@@ -242,6 +303,7 @@ def read_company_settings(
     return settings_response(get_or_create_company_settings(db))
 
 
+@router.put("/", response_model=CompanySettingsRead, summary="Update company settings", include_in_schema=False)
 @router.put("", response_model=CompanySettingsRead, summary="Update company settings")
 def update_company_settings(
     payload: CompanySettingsUpdate,
@@ -249,7 +311,12 @@ def update_company_settings(
     _: Annotated[User, Depends(get_current_admin_user)],
 ) -> CompanySettingsRead:
     settings_record = get_or_create_company_settings(db)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    branding_changed = any(
+        field in BRANDING_FIELDS and getattr(settings_record, field) != value
+        for field, value in changes.items()
+    )
+    for field, value in changes.items():
         setattr(settings_record, field, value)
     if settings_record.shift_end_time <= settings_record.shift_start_time:
         raise HTTPException(
@@ -263,6 +330,9 @@ def update_company_settings(
     settings_record.updated_at = utc_now()
     db.commit()
     db.refresh(settings_record)
+    if branding_changed:
+        refresh_branding_artifacts(db, settings_record)
+        db.refresh(settings_record)
     return settings_response(settings_record)
 
 
@@ -344,15 +414,16 @@ async def upload_company_logo(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_detail(
                 "unsupported_logo_type",
-                "Logo must be a PNG, JPEG, or WebP image",
+                "Logo must be a PNG or JPEG image so it can be embedded in generated PDFs",
             ),
         )
 
     content_type, extension = logo_format
+    ensure_logo_pdf_renderable(content)
     settings_record = get_or_create_company_settings(db)
     destination = logo_directory() / f"company-logo{extension}"
-    destination.write_bytes(content)
-    new_logo_path = destination.relative_to(get_settings().upload_dir).as_posix()
+    write_bytes_atomically(destination, content)
+    new_logo_path = destination.resolve().relative_to(upload_root()).as_posix()
     if settings_record.logo_path != new_logo_path:
         remove_logo_file(settings_record.logo_path)
     remove_old_logo_variants(destination)
@@ -362,6 +433,8 @@ async def upload_company_logo(
     settings_record.logo_updated_at = utc_now()
     settings_record.updated_at = settings_record.logo_updated_at
     db.commit()
+    db.refresh(settings_record)
+    refresh_branding_artifacts(db, settings_record)
     db.refresh(settings_record)
 
     return settings_response(settings_record)
@@ -805,6 +878,8 @@ def delete_company_logo(
     settings_record.logo_updated_at = None
     settings_record.updated_at = utc_now()
     db.commit()
+    db.refresh(settings_record)
+    refresh_branding_artifacts(db, settings_record)
     db.refresh(settings_record)
 
     return settings_response(settings_record)

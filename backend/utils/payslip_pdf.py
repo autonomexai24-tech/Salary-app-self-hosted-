@@ -60,10 +60,10 @@ def resolve_logo_path(
     try:
         candidate.relative_to(upload_root)
     except ValueError:
-        return None
+        raise ValueError("Configured company logo path is outside the upload directory")
 
     if not candidate.is_file():
-        return None
+        raise FileNotFoundError(f"Configured company logo is missing: {candidate}")
     return candidate
 
 
@@ -80,8 +80,8 @@ def logo_image(
         image = Image(str(logo_path))
         image._restrictSize(35 * mm, 22 * mm)
         return image
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(f"Configured company logo could not be rendered: {logo_path}") from exc
 
 
 def company_contact_lines(company_settings: CompanySettings) -> list[str]:

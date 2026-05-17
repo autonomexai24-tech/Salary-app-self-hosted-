@@ -3,8 +3,9 @@ from __future__ import annotations
 import re
 import uuid
 import zipfile
+import logging
 from io import BytesIO
-from datetime import date as date_type
+from datetime import date as date_type, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
@@ -77,6 +78,7 @@ COMPANY_SETTINGS_ID = 1
 DEFAULT_COMPANY_NAME = "Your Company"
 SAFE_FILENAME_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 PAYSLIP_UPLOAD_DIRNAME = "payslips"
+logger = logging.getLogger(__name__)
 
 
 def error_detail(code: str, message: str) -> dict[str, str]:
@@ -466,8 +468,16 @@ def payslip_archive_filename(month_year: str) -> str:
     return f"payslips-{safe_filename(month_year)}.zip"
 
 
+def upload_root() -> Path:
+    settings = get_settings()
+    resolved_upload_dir = getattr(settings, "resolved_upload_dir", None)
+    if resolved_upload_dir is not None:
+        return Path(resolved_upload_dir).resolve()
+    return Path(settings.upload_dir).expanduser().resolve()
+
+
 def upload_relative_path(path: Path) -> str:
-    upload_dir = get_settings().upload_dir.resolve()
+    upload_dir = upload_root()
     return path.resolve().relative_to(upload_dir).as_posix()
 
 
@@ -475,7 +485,7 @@ def resolve_upload_path(relative_path: str | None) -> Path | None:
     if not relative_path:
         return None
 
-    upload_dir = get_settings().upload_dir.resolve()
+    upload_dir = upload_root()
     candidate = (upload_dir / relative_path).resolve()
     try:
         candidate.relative_to(upload_dir)
@@ -485,7 +495,7 @@ def resolve_upload_path(relative_path: str | None) -> Path | None:
 
 
 def payslip_directory() -> Path:
-    directory = get_settings().upload_dir / PAYSLIP_UPLOAD_DIRNAME
+    directory = upload_root() / PAYSLIP_UPLOAD_DIRNAME
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -520,6 +530,33 @@ def write_bytes_atomically(path: Path, content: bytes) -> None:
             temp_path.unlink()
 
 
+def normalized_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def branding_updated_after_pdf(
+    row: PayrollLedger,
+    company_settings: CompanySettings,
+) -> bool:
+    generated_at = normalized_utc(row.payslip_generated_at)
+    if generated_at is None:
+        return True
+
+    branding_dates = [
+        normalized_utc(company_settings.updated_at),
+        normalized_utc(company_settings.logo_updated_at),
+    ]
+    latest_branding_update = max(
+        (value for value in branding_dates if value is not None),
+        default=None,
+    )
+    return latest_branding_update is not None and latest_branding_update > generated_at
+
+
 def ensure_payslip_pdf(
     row: PayrollLedger,
     *,
@@ -528,6 +565,7 @@ def ensure_payslip_pdf(
     generated_paths: list[Path] | None = None,
 ) -> Path:
     ensure_locked_payslip_row(row)
+    settings_record = company_settings or get_company_settings_for_payslip(db)
 
     if row.payslip_pdf_path:
         stored_path = resolve_upload_path(row.payslip_pdf_path)
@@ -547,16 +585,18 @@ def ensure_payslip_pdf(
                     "The persisted payslip file is missing from storage",
                 ),
             )
+        if not branding_updated_after_pdf(row, settings_record):
+            return stored_path
+
+        generated_at = utc_now()
+        pdf_content = build_payslip_pdf_or_500(row, company_settings=settings_record, generated_at=generated_at)
+        write_bytes_atomically(stored_path, pdf_content)
+        row.payslip_generated_at = generated_at
         return stored_path
 
     destination = payslip_path(row)
-    generated_at = row.payslip_generated_at or row.locked_at or row.finalized_at or utc_now()
-    pdf_content = build_payslip_pdf(
-        row,
-        company_settings=company_settings or get_company_settings_for_payslip(db),
-        upload_dir=get_settings().upload_dir,
-        generated_at=generated_at,
-    )
+    generated_at = utc_now()
+    pdf_content = build_payslip_pdf_or_500(row, company_settings=settings_record, generated_at=generated_at)
     write_bytes_atomically(destination, pdf_content)
     if generated_paths is not None:
         generated_paths.append(destination)
@@ -564,6 +604,71 @@ def ensure_payslip_pdf(
     row.payslip_pdf_path = upload_relative_path(destination)
     row.payslip_generated_at = generated_at
     return destination
+
+
+def build_payslip_pdf_or_500(
+    row: PayrollLedger,
+    *,
+    company_settings: CompanySettings,
+    generated_at: datetime,
+) -> bytes:
+    try:
+        return build_payslip_pdf(
+            row,
+            company_settings=company_settings,
+            upload_dir=upload_root(),
+            generated_at=generated_at,
+        )
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        logger.exception(
+            "PDF branding render failed for payroll ledger row %s",
+            row.id,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_detail(
+                "pdf_branding_render_failed",
+                "PDF branding render failed because the configured logo asset is missing or unreadable",
+            ),
+        ) from exc
+
+
+def refresh_payslip_artifacts_for_branding_change(
+    db: Session,
+    company_settings: CompanySettings,
+) -> None:
+    rows = list(
+        db.scalars(
+            select(PayrollLedger)
+            .where(PayrollLedger.is_locked.is_(True))
+            .order_by(PayrollLedger.month_year.asc(), PayrollLedger.employee_name.asc())
+        ).all()
+    )
+    if not rows:
+        return
+
+    generated_paths: list[Path] = []
+    rows_by_month: dict[str, list[PayrollLedger]] = {}
+    try:
+        for row in rows:
+            ensure_payslip_pdf(
+                row,
+                db=db,
+                company_settings=company_settings,
+                generated_paths=generated_paths,
+            )
+            rows_by_month.setdefault(row.month_year, []).append(row)
+
+        for month_year, month_rows in rows_by_month.items():
+            ensure_payslip_zip(month_year=month_year, rows=month_rows, db=db)
+
+        if any(db.is_modified(row, include_collections=False) for row in rows):
+            db.commit()
+    except Exception:
+        db.rollback()
+        cleanup_generated_files(generated_paths)
+        raise
 
 
 def cleanup_generated_files(paths: list[Path]) -> None:
@@ -1125,9 +1230,13 @@ def ensure_payslip_zip(
         and row.payslip_zip_generated_at is not None
         for row in rows
     )
+    zip_stale = (
+        destination.is_file()
+        and any(pdf_path.stat().st_mtime > destination.stat().st_mtime for pdf_path in pdf_paths)
+    )
 
     zip_written = False
-    if not destination.is_file() or not zip_metadata_complete:
+    if not destination.is_file() or not zip_metadata_complete or zip_stale:
         archive_buffer = BytesIO()
         with zipfile.ZipFile(archive_buffer, mode="w") as archive:
             for row, pdf_path in sorted(

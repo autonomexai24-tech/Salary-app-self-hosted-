@@ -4,6 +4,7 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/contexts/AuthContext";
+import { BrandingProvider } from "@/contexts/BrandingContext";
 import { AppLayout, AdminRoute } from "@/components/AppLayout";
 import Login from "@/pages/Login";
 import DailyLog from "@/pages/DailyLog";
@@ -22,17 +23,19 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route element={<AppLayout />}>
-              <Route path="/" element={<DailyLog />} />
-              <Route path="/people" element={<AdminRoute><PeopleHub /></AdminRoute>} />
-              <Route path="/payroll" element={<AdminRoute><PayrollEngine /></AdminRoute>} />
-              <Route path="/receipts" element={<AdminRoute><ReceiptVault /></AdminRoute>} />
-              <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
-            </Route>
-            <Route path="*" element={<NotFound />} />
-          </Routes>
+          <BrandingProvider>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route element={<AppLayout />}>
+                <Route path="/" element={<DailyLog />} />
+                <Route path="/people" element={<AdminRoute><PeopleHub /></AdminRoute>} />
+                <Route path="/payroll" element={<AdminRoute><PayrollEngine /></AdminRoute>} />
+                <Route path="/receipts" element={<AdminRoute><ReceiptVault /></AdminRoute>} />
+                <Route path="/settings" element={<AdminRoute><Settings /></AdminRoute>} />
+              </Route>
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </BrandingProvider>
         </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>

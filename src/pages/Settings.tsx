@@ -8,14 +8,12 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Building2, ImageIcon, Save, ShieldCheck, Plus, UserX } from "lucide-react";
 import {
+  ApiError,
   apiErrorMessage,
   createUser,
   listUsers,
-  readCompanySettings,
-  resolveApiAssetUrl,
-  updateCompanySettings,
-  uploadCompanyLogo,
 } from "@/lib/api";
+import { logBrandingAssetMissing, useBranding } from "@/contexts/BrandingContext";
 import { toast } from "sonner";
 
 interface SystemUser {
@@ -25,11 +23,26 @@ interface SystemUser {
   role: "Admin" | "Operator";
 }
 
+function brandingErrorDescription(error: unknown): string {
+  if (error instanceof ApiError && ["network_error", "request_timeout"].includes(error.code ?? "")) {
+    return "Backend unavailable";
+  }
+  return apiErrorMessage(error);
+}
+
 export default function Settings() {
+  const {
+    settings: brandingSettings,
+    logoUrl,
+    errorMessage: brandingLoadError,
+    saveBranding: saveCentralBranding,
+    uploadLogo,
+  } = useBranding();
+
   // Branding
   const [companyName, setCompanyName] = useState("");
   const [companyAddress, setCompanyAddress] = useState("");
-  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const [localLogoPreview, setLocalLogoPreview] = useState<string | null>(null);
   const [isSavingBranding, setIsSavingBranding] = useState(false);
 
   // User management
@@ -40,21 +53,20 @@ export default function Settings() {
   const [newPassword, setNewPassword] = useState("");
 
   useEffect(() => {
-    let cancelled = false;
+    if (!brandingSettings) return;
+    setCompanyName(brandingSettings.company_name);
+    setCompanyAddress(brandingSettings.address ?? "");
+  }, [brandingSettings]);
 
-    readCompanySettings()
-      .then((settings) => {
-        if (cancelled) return;
-        setCompanyName(settings.company_name);
-        setCompanyAddress(settings.address ?? "");
-        setLogoPreview(resolveApiAssetUrl(settings.logo_url));
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        toast.error("Could not load company settings", {
-          description: apiErrorMessage(error),
-        });
-      });
+  useEffect(() => {
+    if (!brandingLoadError || brandingSettings) return;
+    toast.error("Backend unavailable", {
+      description: brandingLoadError,
+    });
+  }, [brandingLoadError, brandingSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
 
     listUsers()
       .then((records) => {
@@ -79,18 +91,26 @@ export default function Settings() {
   }, []);
 
   const saveBranding = async () => {
+    const normalizedName = companyName.trim();
+    if (!normalizedName) {
+      toast.error("Branding save failed", {
+        description: "Registered company name is required.",
+      });
+      return;
+    }
+
     setIsSavingBranding(true);
     try {
-      const settings = await updateCompanySettings({
-        company_name: companyName.trim(),
+      const settings = await saveCentralBranding({
+        company_name: normalizedName,
         address: companyAddress.trim() || null,
       });
       setCompanyName(settings.company_name);
       setCompanyAddress(settings.address ?? "");
       toast.success("Company branding saved");
     } catch (error) {
-      toast.error("Could not save company branding", {
-        description: apiErrorMessage(error),
+      toast.error("Branding save failed", {
+        description: brandingErrorDescription(error),
       });
     } finally {
       setIsSavingBranding(false);
@@ -98,25 +118,30 @@ export default function Settings() {
   };
 
   const handleLogoFile = async (file: File) => {
-    const previousLogo = logoPreview;
     const localPreviewUrl = URL.createObjectURL(file);
-    setLogoPreview(localPreviewUrl);
+    setLocalLogoPreview(localPreviewUrl);
     try {
-      const settings = await uploadCompanyLogo(file);
-      setLogoPreview(resolveApiAssetUrl(settings.logo_url));
+      await uploadLogo(file);
+      setLocalLogoPreview(null);
       toast.success("Company logo uploaded");
     } catch (error) {
-      setLogoPreview(previousLogo);
-      toast.error("Could not upload company logo", {
-        description: apiErrorMessage(error),
+      setLocalLogoPreview(null);
+      toast.error("Logo upload failed", {
+        description: brandingErrorDescription(error),
       });
     } finally {
       URL.revokeObjectURL(localPreviewUrl);
     }
   };
 
+  const logoPreview = localLogoPreview ?? logoUrl;
+
   const addUser = async () => {
     if (!newName.trim() || !newUserId.trim() || !newPassword) return;
+    if (newPassword.length < 10) {
+      toast.error("Password must be at least 10 characters.");
+      return;
+    }
     try {
       const created = await createUser({
         fullName: newName.trim(),
@@ -171,7 +196,7 @@ export default function Settings() {
               <Label className="text-xs">Company Logo</Label>
               <label className="flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-muted-foreground/25 bg-muted/30 p-6 cursor-pointer hover:border-primary/40 hover:bg-primary/5 transition-colors">
                 {logoPreview ? (
-                  <img src={logoPreview} alt="Logo" className="max-h-16 max-w-[200px] object-contain" />
+                  <img src={logoPreview} alt="Company logo" className="max-h-16 max-w-[200px] object-contain" onError={() => logBrandingAssetMissing(logoPreview)} />
                 ) : (
                   <>
                     <ImageIcon className="h-8 w-8 text-muted-foreground/50" />
@@ -224,10 +249,10 @@ export default function Settings() {
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">Password</Label>
-                <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" className="h-9 text-sm" />
+                <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Minimum 10 characters" className="h-9 text-sm" minLength={10} />
               </div>
             </div>
-            <Button size="sm" variant="outline" className="w-full" onClick={addUser} disabled={!newName.trim() || !newUserId.trim() || !newPassword}>
+            <Button size="sm" variant="outline" className="w-full" onClick={addUser} disabled={!newName.trim() || !newUserId.trim() || newPassword.length < 10}>
               <Plus className="h-3.5 w-3.5 mr-1.5" />
               Add User
             </Button>

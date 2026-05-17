@@ -22,13 +22,11 @@ import {
   initialsFromName,
   listEmployees,
   monthYearFromDate,
-  readCompanySettings,
   readPayrollLedger,
-  resolveApiAssetUrl,
-  type BackendCompanySettings,
   type BackendEmployee,
   type BackendPayrollLine,
 } from "@/lib/api";
+import { logBrandingAssetMissing, useBranding } from "@/contexts/BrandingContext";
 import { toast } from "sonner";
 
 interface ApprovedPayslip {
@@ -153,22 +151,11 @@ export default function ReceiptVault() {
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [payslips, setPayslips] = useState<ApprovedPayslip[]>([]);
-  const [companySettings, setCompanySettings] = useState<BackendCompanySettings | null>(null);
+  const { companyName, companyAddressLines, logoUrl } = useBranding();
   const selectedMonthYear = useMemo(() => monthYearFromDate(selectedMonth), [selectedMonth]);
 
   useEffect(() => {
     let cancelled = false;
-
-    readCompanySettings()
-      .then((settings) => {
-        if (!cancelled) setCompanySettings(settings);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        toast.error("Could not load company settings", {
-          description: apiErrorMessage(error),
-        });
-      });
 
     async function loadPayslips() {
       try {
@@ -197,10 +184,7 @@ export default function ReceiptVault() {
 
   const selected = payslips.find((p) => p.employeeId === selectedId) ?? payslips[0] ?? EMPTY_PAYSLIP;
   const c = payrollDisplay(selected);
-  const logoUrl = resolveApiAssetUrl(companySettings?.logo_url);
-  const companyName = companySettings?.company_name ?? "";
-  const companyAddress = companySettings?.address ?? "";
-  const companyAddressLines = companyAddress.split("\n");
+  const companyInitials = initialsFromName(companyName).slice(0, 2) || "P";
 
   const handleDownloadAll = async () => {
     if (payslips.length === 0) {
@@ -346,14 +330,14 @@ export default function ReceiptVault() {
 
               {/* Watermark */}
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none opacity-[0.03]">
-                <span className="text-[120px] font-black tracking-widest text-foreground rotate-[-30deg]">PW</span>
+                <span className="text-[120px] font-black tracking-widest text-foreground rotate-[-30deg]">{companyInitials}</span>
               </div>
 
               {/* Header band */}
               <div className="px-10 pt-8 pb-6 flex items-start justify-between relative">
                 <div className="flex items-start gap-4">
                   <div className="h-14 w-14 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700 font-black text-xl shrink-0">
-                    {logoUrl ? <img src={logoUrl} alt="Company logo" className="max-h-12 max-w-12 object-contain" /> : "P"}
+                    {logoUrl ? <img src={logoUrl} alt="Company logo" className="max-h-12 max-w-12 object-contain" onError={() => logBrandingAssetMissing(logoUrl)} /> : companyInitials.charAt(0)}
                   </div>
                   <div>
                     <p className="text-[15px] font-bold text-foreground tracking-tight leading-tight">{companyName}</p>

@@ -146,6 +146,13 @@ def read_current_user(
 
 
 @router.post(
+    "/",
+    response_model=UserRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a user",
+    include_in_schema=False,
+)
+@router.post(
     "",
     response_model=UserRead,
     status_code=status.HTTP_201_CREATED,
@@ -167,6 +174,7 @@ def create_user(
     return user
 
 
+@router.get("/", response_model=UserList, summary="List users", include_in_schema=False)
 @router.get("", response_model=UserList, summary="List users")
 def list_users(
     db: Annotated[Session, Depends(get_db)],
