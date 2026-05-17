@@ -1457,13 +1457,15 @@ def init_db() -> None:
             apply_schema_updates(connection)
             seed_catalogs_from_existing_employees(connection)
             seed_default_admin(connection)
-        if settings.seed_demo_data:
+        if settings.seed_demo_data and not settings.is_production:
             try:
                 from .demo_seed import seed_demo_data
             except ImportError:
                 from demo_seed import seed_demo_data
 
             seed_demo_data()
+        elif settings.seed_demo_data and settings.is_production:
+            print("Demo data seeding skipped in production")
     except (SQLAlchemyError, ValidationError, ValueError) as exc:
         raise RuntimeError(f"Database initialization failed: {exc.__class__.__name__}") from exc
 
